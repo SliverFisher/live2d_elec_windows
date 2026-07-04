@@ -1,0 +1,30 @@
+{
+  "name": "live2d-renderer-electron",
+  "version": "0.1.0",
+  "description": "Standalone Live2D renderer process for WPF host applications.",
+  "main": "out/main/main.js",
+  "author": "MaidAI",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "package": "npm run build && electron-builder --config electron-builder.yml --dir && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/flatten-release.ps1",
+    "package:portable": "npm run build && electron-builder --config electron-builder.yml",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@pixi/sound": "^6.0.1",
+    "@pixi/unsafe-eval": "^7.4.3",
+    "pixi.js": "^8.19.0",
+    "untitled-pixi-live2d-engine": "^1.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.10",
+    "electron": "^37.2.0",
+    "electron-builder": "^26.0.12",
+    "electron-vite": "^4.0.0",
+    "typescript": "^5.8.3"
+  }
+}

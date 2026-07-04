@@ -1,0 +1,20 @@
+appId: com.maidai.live2drenderer
+productName: Live2DRenderer
+asar: true
+directories:
+  output: ../../release/MaidAI/Live2DRenderer-new
+files:
+  - out/**
+  - package.json
+extraResources:
+  - from: vendor
+    to: vendor
+    filter:
+      - "**/*"
+win:
+  executableName: Live2DRenderer
+  signAndEditExecutable: false
+  forceCodeSigning: false
+  target:
+    - portable
+  artifactName: Live2DRenderer.exe

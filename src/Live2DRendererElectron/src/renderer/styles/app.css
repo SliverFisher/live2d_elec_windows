@@ -1,0 +1,51 @@
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  position: relative;
+}
+
+#live2d-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: transparent;
+  cursor: grab;
+}
+
+#live2d-canvas:active {
+  cursor: grabbing;
+}
+
+#status {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: none;
+  padding: 8px 10px;
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 6px;
+  color: white;
+  background: rgb(20 24 30 / 72%);
+  font: 12px/1.4 system-ui, "Segoe UI", sans-serif;
+  pointer-events: none;
+}
+
+#status.is-visible {
+  display: block;
+}
