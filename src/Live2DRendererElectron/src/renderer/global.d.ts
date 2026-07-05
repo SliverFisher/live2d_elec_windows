@@ -1,4 +1,4 @@
-﻿import type { RendererApi } from '../preload/preload';
+import type { RendererApi } from '../preload/preload';
 
 declare global {
   interface Window {

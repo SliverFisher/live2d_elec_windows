@@ -1,14 +1,28 @@
 using System.Diagnostics;
-using System.IO.Pipes;
 using System.Text;
 
 Console.InputEncoding = new UTF8Encoding(false);
 Console.OutputEncoding = new UTF8Encoding(false);
 Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
 
+// Live2DRenderer.exe is a thin .NET wrapper that launches the Electron host
+// (Live2DRendererHost.exe) and transparently forwards the AI_maid Named Pipe
+// protocol arguments. The wrapper does NOT create its own pipes — all
+// protocol traffic flows directly between AI_maid and the Electron host.
+//
+// Supported arguments (forwarded to the host):
+//   --pipe-name <name>       Named Pipe to connect (AI_maid mode)
+//   --parent-pid <pid>       Parent process PID to watch for exit
+//   --log-dir <dir>          Log output directory
+//   --model <path>           Dev/debug model path
+//   --no-default-model       Skip loading any default model
+//
+// When --pipe-name is NOT provided, the wrapper enters debug mode and will
+// auto-load a default model (unless --no-default-model is given), so running
+// the exe standalone still shows the character.
+
 var baseDirectory = AppContext.BaseDirectory;
 var hostPath = Path.Combine(baseDirectory, "Live2DRendererHost.exe");
-var startupModelPath = ResolveStartupModelPath(args, baseDirectory);
 
 if (!File.Exists(hostPath))
 {
@@ -16,23 +30,23 @@ if (!File.Exists(hostPath))
     return 2;
 }
 
-var id = Guid.NewGuid().ToString("N");
-var commandPipeName = $"Live2DRenderer-{id}-commands";
-var eventPipeName = $"Live2DRenderer-{id}-events";
+// Parse arguments
+var pipeName = GetArgValue(args, "--pipe-name");
+var parentPid = GetArgValue(args, "--parent-pid");
+var logDir = GetArgValue(args, "--log-dir");
+var explicitModel = GetArgValue(args, "--model");
+var noDefaultModel = args.Any(arg => string.Equals(arg, "--no-default-model", StringComparison.OrdinalIgnoreCase));
 
-await using var commandPipe = new NamedPipeServerStream(
-    commandPipeName,
-    PipeDirection.Out,
-    1,
-    PipeTransmissionMode.Byte,
-    PipeOptions.Asynchronous);
+var isAiMaidMode = !string.IsNullOrWhiteSpace(pipeName);
 
-await using var eventPipe = new NamedPipeServerStream(
-    eventPipeName,
-    PipeDirection.In,
-    1,
-    PipeTransmissionMode.Byte,
-    PipeOptions.Asynchronous);
+// Resolve startup model path (only used in debug mode, or as a fallback hint)
+// In AI_maid mode, model loading is driven by the LoadModel command, so we
+// do NOT auto-inject a model path.
+string? startupModelPath = null;
+if (!isAiMaidMode && !noDefaultModel)
+{
+    startupModelPath = ResolveStartupModelPath(explicitModel, baseDirectory);
+}
 
 using var host = new Process();
 host.StartInfo.FileName = hostPath;
@@ -40,66 +54,65 @@ host.StartInfo.WorkingDirectory = baseDirectory;
 host.StartInfo.UseShellExecute = false;
 host.StartInfo.CreateNoWindow = true;
 host.StartInfo.RedirectStandardError = true;
-host.StartInfo.ArgumentList.Add("--command-pipe");
-host.StartInfo.ArgumentList.Add(commandPipeName);
-host.StartInfo.ArgumentList.Add("--event-pipe");
-host.StartInfo.ArgumentList.Add(eventPipeName);
+host.StartInfo.RedirectStandardOutput = true;
+host.StartInfo.RedirectStandardInput = true;
+
+// Forward protocol arguments to the Electron host
+if (!string.IsNullOrWhiteSpace(pipeName))
+{
+    host.StartInfo.ArgumentList.Add("--pipe-name");
+    host.StartInfo.ArgumentList.Add(pipeName);
+}
+
+if (!string.IsNullOrWhiteSpace(parentPid))
+{
+    host.StartInfo.ArgumentList.Add("--parent-pid");
+    host.StartInfo.ArgumentList.Add(parentPid);
+}
+
+if (!string.IsNullOrWhiteSpace(logDir))
+{
+    host.StartInfo.ArgumentList.Add("--log-dir");
+    host.StartInfo.ArgumentList.Add(logDir);
+}
+
+// In debug mode (no --pipe-name), pass --model so the host auto-loads it
+if (!isAiMaidMode && !string.IsNullOrWhiteSpace(startupModelPath))
+{
+    host.StartInfo.ArgumentList.Add("--model");
+    host.StartInfo.ArgumentList.Add(startupModelPath);
+}
+
+if (noDefaultModel)
+{
+    host.StartInfo.ArgumentList.Add("--no-default-model");
+}
 
 host.Start();
 
-var commandConnectTask = commandPipe.WaitForConnectionAsync();
-var eventConnectTask = eventPipe.WaitForConnectionAsync();
-var hostExitTask = host.WaitForExitAsync();
-var connectTask = Task.WhenAll(commandConnectTask, eventConnectTask);
-
-if (await Task.WhenAny(connectTask, hostExitTask) != connectTask)
-{
-    Console.Error.WriteLine(await host.StandardError.ReadToEndAsync());
-    return host.ExitCode == 0 ? 1 : host.ExitCode;
-}
-
-await connectTask;
-
-using var commandWriter = new StreamWriter(commandPipe, new UTF8Encoding(false), leaveOpen: true)
-{
-    AutoFlush = true,
-    NewLine = "\n"
-};
-using var eventReader = new StreamReader(eventPipe, Encoding.UTF8, leaveOpen: true);
-var closedEvent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
+// Pipe stdin/stdout/stderr through transparently.
+// The wrapper does NOT interpret the JSON Lines protocol — bytes flow as-is.
 var stdinTask = Task.Run(async () =>
 {
-    string? line;
-    while ((line = await Console.In.ReadLineAsync()) is not null)
+    try
     {
-        await commandWriter.WriteLineAsync(line);
+        var stdin = Console.OpenStandardInput();
+        var hostStdin = host.StandardInput.BaseStream;
+        await stdin.CopyToAsync(hostStdin);
     }
+    catch { }
+    try { host.StandardInput.Close(); } catch { }
 });
 
 var stdoutTask = Task.Run(async () =>
 {
-    string? line;
-    var startupModelSent = false;
-    while ((line = await eventReader.ReadLineAsync()) is not null)
+    try
     {
-        Console.Out.WriteLine(line);
-        Console.Out.Flush();
-        if (!startupModelSent &&
-            startupModelPath is not null &&
-            line.Contains("\"type\":\"RendererReady\"", StringComparison.Ordinal))
-        {
-            startupModelSent = true;
-            var command = $"{{\"type\":\"LoadModel\",\"modelPath\":\"{EscapeJsonString(startupModelPath.Replace('\\', '/'))}\"}}";
-            await commandWriter.WriteLineAsync(command);
-        }
-
-        if (line.Contains("\"type\":\"Closed\"", StringComparison.Ordinal))
-        {
-            closedEvent.TrySetResult();
-            break;
-        }
+        var stdout = Console.OpenStandardOutput();
+        var hostStdout = host.StandardOutput.BaseStream;
+        await hostStdout.CopyToAsync(stdout);
     }
+    catch { }
 });
 
 var stderrTask = Task.Run(async () =>
@@ -111,43 +124,15 @@ var stderrTask = Task.Run(async () =>
     }
 });
 
-await Task.WhenAny(hostExitTask, stdoutTask, stdinTask, closedEvent.Task);
-var closedNormally = closedEvent.Task.IsCompletedSuccessfully;
+await host.WaitForExitAsync();
 
-if (!host.HasExited)
+// Give pipes a moment to flush
+await Task.WhenAny(Task.WhenAll(stdoutTask, stderrTask), Task.Delay(500));
+
+return host.ExitCode;
+
+static string? ResolveStartupModelPath(string? explicitModel, string baseDirectory)
 {
-    try
-    {
-        if (!closedNormally)
-        {
-            await commandWriter.WriteLineAsync("{\"type\":\"Close\"}");
-        }
-
-        if (!host.WaitForExit(3000))
-        {
-            host.Kill(entireProcessTree: true);
-        }
-    }
-    catch
-    {
-        if (!host.HasExited)
-        {
-            host.Kill(entireProcessTree: true);
-        }
-    }
-}
-
-await Task.WhenAny(stderrTask, Task.Delay(1000));
-return closedNormally ? 0 : host.ExitCode;
-
-static string? ResolveStartupModelPath(string[] args, string baseDirectory)
-{
-    if (args.Any(arg => string.Equals(arg, "--no-default-model", StringComparison.OrdinalIgnoreCase)))
-    {
-        return null;
-    }
-
-    var explicitModel = GetArgValue(args, "--model") ?? Environment.GetEnvironmentVariable("LIVE2D_RENDERER_MODEL");
     if (!string.IsNullOrWhiteSpace(explicitModel))
     {
         return Path.GetFullPath(explicitModel);
@@ -184,41 +169,4 @@ static string? GetArgValue(string[] args, string name)
     }
 
     return null;
-}
-
-static string EscapeJsonString(string value)
-{
-    var builder = new StringBuilder(value.Length + 16);
-    foreach (var character in value)
-    {
-        switch (character)
-        {
-            case '\\':
-                builder.Append(@"\\");
-                break;
-            case '"':
-                builder.Append("\\\"");
-                break;
-            case '\b':
-                builder.Append(@"\b");
-                break;
-            case '\f':
-                builder.Append(@"\f");
-                break;
-            case '\n':
-                builder.Append(@"\n");
-                break;
-            case '\r':
-                builder.Append(@"\r");
-                break;
-            case '\t':
-                builder.Append(@"\t");
-                break;
-            default:
-                builder.Append(character);
-                break;
-        }
-    }
-
-    return builder.ToString();
 }

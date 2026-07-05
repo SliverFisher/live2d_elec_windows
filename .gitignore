@@ -30,3 +30,7 @@ Desktop.ini
 # Temporary files
 *.tmp
 *.bak
+
+# Mock client test output
+mock-*.txt
+.asar-staging/

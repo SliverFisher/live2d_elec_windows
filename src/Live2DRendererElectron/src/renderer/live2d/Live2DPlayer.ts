@@ -221,6 +221,32 @@ export class Live2DPlayer {
     return pixel[3] > HIT_ALPHA_THRESHOLD;
   }
 
+  /**
+   * Returns the names of hit areas that contain the given client-space point.
+   * Returns an empty array if the model has no hit areas or hit testing fails.
+   * Uses the underlying pixi-live2d-display hitTest API (model-local coords).
+   */
+  hitTest(clientX: number, clientY: number): string[] {
+    if (!this.live2dModel) {
+      return [];
+    }
+
+    try {
+      const point = this.clientToPixiPoint(clientX, clientY);
+      // pixi-live2d-display hitTest expects model-local coordinates,
+      // which are the same as Pixi stage coordinates since the model is on the stage.
+      const hitFn = (this.live2dModel as any).hitTest;
+      if (typeof hitFn !== 'function') {
+        return [];
+      }
+      const result = hitFn.call(this.live2dModel, point.x, point.y);
+      return Array.isArray(result) ? result.filter((n: unknown) => typeof n === 'string') : [];
+    } catch (e) {
+      console.warn('[Live2DPlayer] hitTest failed', e);
+      return [];
+    }
+  }
+
   private ensureEnoughMaskRenderTextures(internalModel: any): void {
     const renderer = internalModel?.renderer;
     const coreModel = internalModel?.coreModel;

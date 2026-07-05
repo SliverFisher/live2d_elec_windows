@@ -1,7 +1,9 @@
 import { app, protocol } from 'electron';
-import { createRendererWindow, handleHostCommand, registerWindowIpc } from './windowManager';
-import { log } from './logger';
-import { startNamedPipeProtocol, startStdioProtocol } from './stdioProtocol';
+import { createRendererWindow, handleAiMaidCommand, registerWindowIpc } from './windowManager';
+import { log, setLogDir } from './logger';
+import { parseStartupArgs, isAiMaidMode, type StartupArgs } from './args';
+import { startProtocol, closeProtocol, type CommandRouter } from './protocol';
+import { ParentWatcher } from './parentWatcher';
 
 app.commandLine.appendSwitch('disable-gpu-sandbox');
 
@@ -18,51 +20,76 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+let startupArgs: StartupArgs;
+let parentWatcher: ParentWatcher | null = null;
+let isQuitting = false;
+
 app.whenReady().then(() => {
+  startupArgs = parseStartupArgs(process.argv);
+
+  // Configure log directory if provided
+  if (startupArgs.logDir) {
+    setLogDir(startupArgs.logDir);
+  }
+
   log('Renderer starting');
+  log('Startup args', {
+    pipeName: startupArgs.pipeName,
+    parentPid: startupArgs.parentPid,
+    logDir: startupArgs.logDir,
+    model: startupArgs.model,
+    noDefaultModel: startupArgs.noDefaultModel,
+    isAiMaidMode: isAiMaidMode(startupArgs)
+  });
   log('Env check', {
     isPackaged: app.isPackaged,
+    electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
     electronRendererUrl: process.env.ELECTRON_RENDERER_URL || 'NOT SET',
     appPath: app.getAppPath()
   });
+
   registerWindowIpc();
-  startCommandProtocol();
   createRendererWindow();
+
+  // Start the protocol transport (Named Pipe for AI_maid mode, stdio for debug)
+  const router: CommandRouter = (command, requestId) => {
+    handleAiMaidCommand(command, requestId);
+  };
+  startProtocol(startupArgs, router);
+
+  // Start parent process watcher if --parent-pid provided
+  if (startupArgs.parentPid && startupArgs.parentPid > 0) {
+    parentWatcher = new ParentWatcher(startupArgs.parentPid, () => {
+      log('Parent process exited, shutting down');
+      shutdown('AI_maidExit');
+    });
+    parentWatcher.start();
+  }
 });
 
 app.on('window-all-closed', () => {
   log('All windows closed');
-  app.quit();
+  shutdown('WindowClosed');
 });
 
 app.on('before-quit', () => {
   log('Renderer exiting');
 });
 
-function startCommandProtocol(): void {
-  const commandPipe = getArgValue('--command-pipe');
-  const eventPipe = getArgValue('--event-pipe');
-
-  if (commandPipe && eventPipe) {
-    startNamedPipeProtocol(commandPipe, eventPipe, handleHostCommand);
+function shutdown(reason: string): void {
+  if (isQuitting) {
     return;
   }
+  isQuitting = true;
 
-  startStdioProtocol(handleHostCommand);
-}
+  log('Shutdown initiated', { reason });
 
-function getArgValue(name: string): string | null {
-  const prefix = `${name}=`;
-  for (let index = 0; index < process.argv.length; index += 1) {
-    const arg = process.argv[index];
-    if (arg === name) {
-      return process.argv[index + 1] ?? null;
-    }
-
-    if (arg.startsWith(prefix)) {
-      return arg.slice(prefix.length);
-    }
+  if (parentWatcher) {
+    parentWatcher.stop();
+    parentWatcher = null;
   }
 
-  return null;
+  closeProtocol(reason);
+  app.quit();
 }

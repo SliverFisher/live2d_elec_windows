@@ -1,8 +1,14 @@
-﻿import { contextBridge, ipcRenderer } from 'electron';
-import type { HostCommand, RendererEvent } from '../main/protocolTypes';
+import { contextBridge, ipcRenderer } from 'electron';
+import type { RendererCommand, RendererEvent } from '../main/protocolTypes';
+
+export type StartupInfo = {
+  isAiMaidMode: boolean;
+  model: string | null;
+  noDefaultModel: boolean;
+};
 
 export type RendererApi = {
-  onHostCommand: (callback: (command: HostCommand) => void) => () => void;
+  onHostCommand: (callback: (command: RendererCommand) => void) => () => void;
   emitEvent: (event: RendererEvent) => Promise<void>;
   petDragStart: () => Promise<void>;
   petDragMove: () => Promise<void>;
@@ -11,11 +17,12 @@ export type RendererApi = {
   setIgnoreMouseEvents: (ignore: boolean, options?: { forward?: boolean }) => Promise<void>;
   resolveModelUrl: (modelPath: string) => Promise<string>;
   getCubismCoreUrl: () => Promise<string>;
+  getStartupArgs: () => Promise<StartupInfo>;
 };
 
 const api: RendererApi = {
   onHostCommand(callback) {
-    const listener = (_event: Electron.IpcRendererEvent, command: HostCommand) => callback(command);
+    const listener = (_event: Electron.IpcRendererEvent, command: RendererCommand) => callback(command);
     ipcRenderer.on('host-command', listener);
     return () => ipcRenderer.off('host-command', listener);
   },
@@ -42,6 +49,9 @@ const api: RendererApi = {
   },
   getCubismCoreUrl() {
     return ipcRenderer.invoke('get-cubism-core-url');
+  },
+  getStartupArgs() {
+    return ipcRenderer.invoke('get-startup-args');
   }
 };
 
