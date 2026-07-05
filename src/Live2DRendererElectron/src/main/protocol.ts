@@ -6,32 +6,39 @@ import type { StartupArgs } from './args';
 import { isAiMaidMode } from './args';
 
 export type CommandRouter = (command: AiMaidCommand, requestId: string | null) => void;
+export type DisconnectHandler = (reason: string) => void;
 
 let transport: 'pipe' | 'stdio' | 'none' = 'none';
 let pipeClient: PipeClient | null = null;
 let stdioWriter: ((line: string) => void) | null = null;
 let stdioDetached = false;
+let stdioDisconnectNotified = false;
 
 /**
  * Start the protocol transport based on startup args.
  * - --pipe-name → Named Pipe JSON Lines (AI_maid mode)
  * - otherwise   → stdio JSON Lines (debug fallback)
+ *
+ * onDisconnect fires when the transport disconnects unexpectedly (WPF gone,
+ * pipe closed, stdin ended). The caller should trigger app.quit() in
+ * response — Live must not linger as a ghost window after its host is gone.
  */
-export function startProtocol(args: StartupArgs, router: CommandRouter): void {
+export function startProtocol(args: StartupArgs, router: CommandRouter, onDisconnect: DisconnectHandler): void {
   if (isAiMaidMode(args)) {
-    startPipe(args.pipeName!, router);
+    startPipe(args.pipeName!, router, onDisconnect);
   } else {
     log('No --pipe-name provided, entering standalone debug mode (stdio protocol)');
-    startStdio(router);
+    startStdio(router, onDisconnect);
   }
 }
 
-function startPipe(pipeName: string, router: CommandRouter): void {
+function startPipe(pipeName: string, router: CommandRouter, onDisconnect: DisconnectHandler): void {
   transport = 'pipe';
   pipeClient = new PipeClient(pipeName);
   pipeClient.onCommand((command, requestId) => {
     router(command, requestId);
   });
+  pipeClient.onDisconnect(onDisconnect);
 
   pipeClient.connect().then(() => {
     log('Pipe protocol connected, sending RendererReady');
@@ -65,9 +72,17 @@ function safeStdoutWrite(line: string): void {
   }
 }
 
-function startStdio(router: CommandRouter): void {
+function startStdio(router: CommandRouter, onDisconnect: DisconnectHandler): void {
   transport = 'stdio';
   stdioWriter = safeStdoutWrite;
+
+  const notifyStdioDisconnect = (reason: string) => {
+    if (stdioDisconnectNotified) return;
+    stdioDisconnectNotified = true;
+    stdioDetached = true;
+    log('stdio disconnect, notifying', { reason });
+    try { onDisconnect(reason); } catch (e) { log('stdio disconnect handler error', e); }
+  };
 
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -90,20 +105,30 @@ function startStdio(router: CommandRouter): void {
       processStdioLine(buffer.trim(), router);
       buffer = '';
     }
-    // Parent closed stdin — detach so we stop trying to write
-    stdioDetached = true;
-    log('stdio stdin ended, detaching writer');
+    // In standalone/debug mode (no --pipe-name), stdin 'end' is NOT a
+    // disconnect signal — it just means no more commands will arrive via
+    // stdin. The window stays open for manual interaction.
+    // Only trigger shutdown if we're NOT in standalone mode (i.e., we were
+    // launched as a child process with stdin piped from a parent).
+    // Since startStdio is only called when !isAiMaidMode (no pipe-name),
+    // and in that case stdin 'end' is expected when running from terminal,
+    // we treat it as a non-fatal event.
+    log('stdio stdin ended (standalone mode — window stays open)');
+    // Do NOT call notifyStdioDisconnect here — that would quit the app.
   });
 
   process.stdin.on('error', (err: Error & { code?: string }) => {
+    // ECONNRESET on stdin can also happen when a parent disconnects
+    // abruptly (e.g. mock client killed). Treat as disconnect.
     log('stdio stdin error', { code: err.code, message: err.message });
-    stdioDetached = true;
+    notifyStdioDisconnect(`stdio stdin error: ${err.code ?? 'unknown'}`);
   });
 
   process.stdout.on('error', (err: Error & { code?: string }) => {
     if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_DESTROYED') {
       stdioDetached = true;
       log('stdio stdout EPIPE ignored, detaching writer', { code: err.code });
+      notifyStdioDisconnect(`stdio stdout ${err.code}`);
     } else {
       log('stdio stdout error', { code: err.code, message: err.message });
     }
@@ -170,6 +195,9 @@ export function sendEvent(payload: RendererEventPayload, requestId: string | nul
  * Send a Closed event and close the transport.
  * If the pipe is already detached, the Closed event is silently dropped
  * (there is nobody to receive it anyway).
+ *
+ * Marks stdio as disconnect-notified so the intentional close doesn't
+ * later trigger a spurious onDisconnect (and double app.quit()).
  */
 export function closeProtocol(reason: string): void {
   sendEvent({ type: 'Closed', reason }, null);
@@ -178,5 +206,6 @@ export function closeProtocol(reason: string): void {
     pipeClient = null;
   }
   stdioDetached = true;
+  stdioDisconnectNotified = true;
   transport = 'none';
 }

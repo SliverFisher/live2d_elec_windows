@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // External protocol types (Named Pipe JSON Lines envelope)
 // ============================================================
 
@@ -29,6 +29,7 @@ export type AiMaidCommand =
   | { type: 'Show' }
   | { type: 'Hide' }
   | { type: 'Close'; reason?: string }
+  | { type: 'Shutdown'; reason?: string }
   | { type: 'SetTransform'; x: number; y: number; scale: number }
   | {
       type: 'PlayMotion';
@@ -47,7 +48,13 @@ export type AiMaidCommand =
       estimatedDurationMs?: number;
     }
   | { type: 'SpeakStop'; reason?: string }
-  | { type: 'SetClickThrough'; enabled: boolean };
+  | { type: 'SetClickThrough'; enabled: boolean }
+  | {
+      type: 'QueryModelGeometry';
+      roleId?: string;
+      includeParts?: boolean;
+      includeAnchors?: boolean;
+    };
 
 // ============================================================
 // Events: Live → AI_maid
@@ -58,7 +65,16 @@ export type RendererEventPayload =
   | { type: 'InitAck'; ok: boolean }
   | { type: 'ModelLoaded'; roleId?: string; modelPath: string }
   | { type: 'ModelLoadFailed'; modelPath: string; message: string }
-  | { type: 'TransformChanged'; x: number; y: number; scale: number; reason: string }
+  | {
+      type: 'TransformChanged';
+      xDip: number;
+      yDip: number;
+      widthDip: number;
+      heightDip: number;
+      scale: number;
+      dpiScale: number;
+      reason: string;
+    }
   | {
       type: 'PointerEvent';
       kind: string;
@@ -70,9 +86,44 @@ export type RendererEventPayload =
       bodyPart: 'head' | 'face' | 'hair' | 'body' | 'hand' | 'leg' | 'other';
       button: string;
     }
-  | { type: 'RightClick'; screenX: number; screenY: number }
+  | {
+      type: 'RightClick';
+      screenXDip: number;
+      screenYDip: number;
+      screenXPx: number;
+      screenYPx: number;
+      displayId: number;
+      displayScaleFactor: number;
+      displayBoundsDip: { x: number; y: number; width: number; height: number };
+      displayWorkAreaDip: { x: number; y: number; width: number; height: number };
+      windowBoundsDip: { x: number; y: number; width: number; height: number };
+    }
   | { type: 'Error'; code: string; message: string }
-  | { type: 'Closed'; reason: string };
+  | { type: 'Closed'; reason: string }
+  | {
+      type: 'ModelGeometryResult';
+      ok: boolean;
+      roleId?: string;
+      coordinateSpace: 'screenDip';
+      modelBounds?: { x: number; y: number; width: number; height: number };
+      anchors?: {
+        modelCenter: { x: number; y: number };
+        headTop: { x: number; y: number };
+        faceCenter: { x: number; y: number };
+        bodyCenter: { x: number; y: number };
+        feetCenter: { x: number; y: number };
+      };
+      parts?: Array<{
+        id: string;
+        name: string;
+        visible: boolean;
+        bounds?: { x: number; y: number; width: number; height: number };
+        anchor?: { x: number; y: number };
+      }>;
+      scale?: number;
+      code?: string;
+      message?: string;
+    };
 
 // ============================================================
 // Internal IPC types (main ↔ renderer)
@@ -91,12 +142,21 @@ export type RendererCommand =
   | { type: 'SetActionTag'; actionTag: string; durationMs?: number }
   | { type: 'SpeakStart'; text?: string; audioPath?: string; estimatedDurationMs?: number }
   | { type: 'SpeakStop' }
-  | { type: 'SetTransform'; scale: number };
+  | { type: 'SetTransform'; scale: number }
+  | {
+      type: 'QueryModelGeometry';
+      roleId?: string;
+      includeParts?: boolean;
+      includeAnchors?: boolean;
+    };
 
 /**
  * Event sent from renderer to main via IPC.
  * NOTE: TransformChanged here only carries scale + reason; the main process
- * fills in x/y from the window bounds before forwarding to AI_maid.
+ * fills in xDip/yDip/widthDip/heightDip from the window bounds before forwarding to AI_maid.
+ * RightClick here only carries screenXDip/screenYDip (in DIP); the main process fills in
+ * screenXPx/screenYPx (via screen.dipToScreenPoint), display info (id, scaleFactor,
+ * bounds, workArea), and windowBoundsDip before forwarding.
  */
 export type RendererEvent =
   | { type: 'ModelLoaded'; modelPath: string; roleId?: string }
@@ -113,8 +173,32 @@ export type RendererEvent =
       bodyPart: 'head' | 'face' | 'hair' | 'body' | 'hand' | 'leg' | 'other';
       button: string;
     }
-  | { type: 'RightClick'; screenX: number; screenY: number }
-  | { type: 'Error'; code: string; message: string };
+  | { type: 'RightClick'; screenXDip: number; screenYDip: number }
+  | { type: 'Error'; code: string; message: string }
+  | {
+      type: 'ModelGeometryResult';
+      ok: boolean;
+      roleId?: string;
+      /** window-relative DIP coordinates — main converts to screenDip */
+      modelBounds?: { x: number; y: number; width: number; height: number };
+      anchors?: {
+        modelCenter: { x: number; y: number };
+        headTop: { x: number; y: number };
+        faceCenter: { x: number; y: number };
+        bodyCenter: { x: number; y: number };
+        feetCenter: { x: number; y: number };
+      };
+      parts?: Array<{
+        id: string;
+        name: string;
+        visible: boolean;
+        bounds?: { x: number; y: number; width: number; height: number };
+        anchor?: { x: number; y: number };
+      }>;
+      scale?: number;
+      code?: string;
+      message?: string;
+    };
 
 // ============================================================
 // Helper: build envelope (strips `type` from payload)

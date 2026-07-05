@@ -235,10 +235,11 @@ canvas.addEventListener('contextmenu', (event) => {
 
   event.preventDefault();
   // Use screenX/screenY from the DOM event (relative to the screen origin)
+  // These are in DIP (Device Independent Pixels)
   void window.live2dRenderer.emitEvent({
     type: 'RightClick',
-    screenX: Math.round(event.screenX),
-    screenY: Math.round(event.screenY)
+    screenXDip: Math.round(event.screenX),
+    screenYDip: Math.round(event.screenY)
   });
 });
 
@@ -251,7 +252,6 @@ async function handleCommand(command: RendererCommand): Promise<void> {
     switch (command.type) {
       case 'LoadModel': {
         console.info('[LoadModel] loadModel_start, modelPath=' + command.modelPath);
-        setStatus('Loading Live2D model...');
         currentModelPath = command.modelPath;
         const [modelUrl, cubismCoreUrl] = await Promise.all([
           window.live2dRenderer.resolveModelUrl(command.modelPath),
@@ -271,6 +271,10 @@ async function handleCommand(command: RendererCommand): Promise<void> {
         isResizingWindow = true;
         await window.live2dRenderer.petResizeToFit(fitted.width, fitted.height);
         setTimeout(() => { isResizingWindow = false; }, 100);
+
+        // After resize-to-fit, emit a TransformChanged so AI_maid captures the
+        // final window bounds (width/height come from main's getBounds).
+        emitTransformChanged('modelLoaded');
 
         setTransparentInputIgnored(true);
         await window.live2dRenderer.emitEvent({
@@ -315,6 +319,51 @@ async function handleCommand(command: RendererCommand): Promise<void> {
       case 'SpeakStop':
         stopSpeaking();
         break;
+      case 'QueryModelGeometry': {
+        console.info('[QueryModelGeometry] received', { roleId: command.roleId });
+
+        if (!player.currentModel) {
+          console.warn('[QueryModelGeometry] model not loaded');
+          await window.live2dRenderer.emitEvent({
+            type: 'ModelGeometryResult',
+            ok: false,
+            code: 'ModelNotLoaded',
+            message: 'model is not loaded'
+          });
+          break;
+        }
+
+        const geometry = player.getModelGeometry();
+        if (!geometry) {
+          console.warn('[QueryModelGeometry] geometry unavailable');
+          await window.live2dRenderer.emitEvent({
+            type: 'ModelGeometryResult',
+            ok: false,
+            code: 'GeometryUnavailable',
+            message: 'failed to compute model geometry'
+          });
+          break;
+        }
+
+        const includeParts = command.includeParts !== false;
+        const includeAnchors = command.includeAnchors !== false;
+
+        console.info('[QueryModelGeometry] result', {
+          modelBounds: geometry.modelBounds,
+          partsCount: includeParts ? geometry.parts.length : 0
+        });
+
+        await window.live2dRenderer.emitEvent({
+          type: 'ModelGeometryResult',
+          ok: true,
+          roleId: command.roleId,
+          modelBounds: geometry.modelBounds,
+          anchors: includeAnchors ? geometry.anchors : undefined,
+          parts: includeParts ? geometry.parts : undefined,
+          scale: geometry.scale
+        });
+        break;
+      }
       default:
         break;
     }
@@ -498,8 +547,6 @@ async function initDevModel(): Promise<void> {
       console.info('[DEV] --no-default-model set, skipping dev model load');
       return;
     }
-
-    setStatus('Dev mode: auto-loading model...');
 
     // Use --model path if provided, otherwise fall back to bundled dev model
     const modelPath = startupInfo.model

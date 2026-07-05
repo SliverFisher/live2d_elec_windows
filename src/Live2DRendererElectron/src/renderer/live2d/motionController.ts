@@ -330,23 +330,25 @@ export function applyActionTag(model: MotionCapableModel | null, tag: string): v
 }
 
 // ============================================================
-// Speaking / mouth oscillation
+// Speaking / lip sync
 //
-// Two modes:
-//  1. Audio-driven (preferred): SpeakStart carries audioPath, we read WAV
-//     amplitude samples and feed ParamMouthOpenY.
-//  2. Synthetic fallback: sine-wave oscillation 0.1..0.9 at ~16Hz.
+// Delegates to the pixi-live2d-display-lipsyncpatch framework's built-in
+// audio-driven lip sync (model.speak / model.stopSpeaking). The framework
+// analyzes the audio in real time and applies mouth parameters inside the
+// per-frame update flow (after motion, before model.update), so motion
+// animations can no longer overwrite the mouth values.
+//
+// If the model does not expose `speak` (older/alternative builds), fall back
+// to a synthetic sine-wave oscillation on ParamMouthOpenY.
 // ============================================================
 
+let speakingModel: MotionCapableModel | null = null;
 let speakingInterval: number | null = null;
-let speakingCoreModel: any | null = null;
-let speakingAudioPath: string | null = null;
+let speakingCoreModel: { setParameterValueById?: (id: string, value: number) => void } | null = null;
 
 /**
  * Start a simple mouth oscillation to simulate speaking.
- * Uses ParamMouthOpenY if available on the model's coreModel.
- *
- * Note: when an audioPath is available, use `startSpeakingWithAudio` instead.
+ * Used only as a fallback when the framework's speak() is unavailable.
  */
 export function startSpeaking(model: MotionCapableModel | null): void {
   if (!model) {
@@ -354,34 +356,41 @@ export function startSpeaking(model: MotionCapableModel | null): void {
   }
   stopSpeaking();
 
+  if (typeof model.speak === 'function') {
+    // No audio path — synthetic lip sync is not supported by the framework's
+    // speak() (it requires an audio URL). Skip rather than fake it.
+    console.info('[MotionController] startSpeak: no audioPath, framework speak() requires audio — skipping');
+    speakingModel = model;
+    return;
+  }
+
+  // Fallback synthetic oscillation
   const coreModel = model.internalModel?.coreModel;
   if (!coreModel || typeof coreModel.setParameterValueById !== 'function') {
     console.warn('[MotionController] startSpeaking: coreModel or setParameterValueById not available');
     return;
   }
 
+  speakingModel = model;
   speakingCoreModel = coreModel;
   const setMouth = coreModel.setParameterValueById.bind(coreModel) as (id: string, value: number) => void;
   let phase = 0;
   speakingInterval = window.setInterval(() => {
     phase += 0.18;
-    // Sine wave between 0.1 and 0.9
     const open = 0.5 + 0.4 * Math.sin(phase);
     try {
       setMouth('ParamMouthOpenY', open);
     } catch {
-      // Parameter may not exist on some models — stop trying
       stopSpeaking();
     }
   }, 60);
 }
 
 /**
- * Start audio-driven mouth animation.
- * Falls back to synthetic oscillation if the audio file cannot be read.
+ * Start audio-driven lip sync using the framework's built-in speak().
  *
- * @param model The Live2D model (must have internalModel.coreModel)
- * @param audioPath Local file path to a WAV file, or null to use synthetic mode
+ * @param model The Live2D model
+ * @param audioPath Local file path or URL to a WAV/MP3 file
  */
 export async function startSpeakingWithAudio(model: MotionCapableModel | null, audioPath: string | null): Promise<void> {
   if (!model) {
@@ -389,191 +398,133 @@ export async function startSpeakingWithAudio(model: MotionCapableModel | null, a
   }
   stopSpeaking();
 
-  const coreModel = model.internalModel?.coreModel;
-  if (!coreModel || typeof coreModel.setParameterValueById !== 'function') {
-    console.warn('[MotionController] startSpeakingWithAudio: coreModel not available');
-    return;
-  }
-
-  speakingCoreModel = coreModel;
-  speakingAudioPath = audioPath;
-
   if (!audioPath) {
-    console.info('[MotionController] mouth analyze: no audioPath, fallback to synthetic oscillation');
+    console.info('[MotionController] startSpeakingWithAudio: no audioPath, falling back to synthetic');
     startSpeaking(model);
     return;
   }
 
+  if (typeof model.speak !== 'function') {
+    console.warn('[MotionController] startSpeakingWithAudio: model.speak not available, falling back to synthetic');
+    startSpeaking(model);
+    return;
+  }
+
+  // Framework speak() fetches the URL itself; convert local Windows paths
+  // to the live2d-file:// protocol that main process serves.
+  const url = toFetchableUrl(audioPath);
+  speakingModel = model;
+  console.info('[MotionController] speak() start', { audioPath, url });
   try {
-    const samples = await readWavAmplitudeSamples(audioPath, 40);
-    if (samples.length === 0) {
-      console.warn('[MotionController] mouth analyze: empty samples, fallback', { audioPath });
-      startSpeaking(model);
-      return;
-    }
-
-    console.info('[MotionController] mouth analyze success', { audioPath, sampleCount: samples.length });
-
-    const setMouth = coreModel.setParameterValueById.bind(coreModel) as (id: string, value: number) => void;
-    let idx = 0;
-    let lastValue = 0;
-    speakingInterval = window.setInterval(() => {
-      if (idx >= samples.length) {
-        // Loop until SpeakStop arrives
-        idx = 0;
+    model.speak(url, {
+      volume: 1,
+      onFinish: () => {
+        console.info('[MotionController] speak() finished', { audioPath });
+      },
+      onError: (err) => {
+        console.warn('[MotionController] speak() error', { audioPath, error: err });
       }
-      const raw = samples[idx++];
-      // Smooth: low-pass filter to reduce jitter
-      lastValue = lastValue * 0.6 + raw * 0.4;
-      // Map amplitude (0..1) to mouth open (0.05..0.95)
-      const open = Math.max(0.05, Math.min(0.95, lastValue * 0.9 + 0.05));
-      try {
-        setMouth('ParamMouthOpenY', open);
-      } catch {
-        stopSpeaking();
-      }
-    }, 40);
+    });
+    patchAudioForSilentLipsync(model);
   } catch (e) {
-    console.warn('[MotionController] mouth analyze failed, fallback to synthetic', { audioPath, error: e });
+    console.warn('[MotionController] speak() threw, falling back to synthetic', { audioPath, error: e });
+    speakingModel = null;
     startSpeaking(model);
   }
 }
 
-/** Stop the speaking mouth oscillation and reset mouth to closed (ParamMouthOpenY = 0). */
+let lipsyncGainNode: GainNode | null = null;
+
+/**
+ * Monkey-patch the audio graph so the analyser reads the full-volume signal
+ * (for correct lip sync) but the speaker output is near-silent.
+ *
+ * Before: audio(volume=0.001) → source → analyser → destination
+ *           (analyser reads attenuated signal → mouth barely moves)
+ *
+ * After:  audio(volume=1) → source → analyser → gainNode(0.001) → destination
+ *           (analyser reads full signal → mouth moves normally; output is silent)
+ */
+function patchAudioForSilentLipsync(model: MotionCapableModel): void {
+  try {
+    const internalModel = (model as any).internalModel;
+    const motionManager = internalModel?.motionManager;
+    if (!motionManager) {
+      console.warn('[MotionController] patchAudio: no motionManager');
+      return;
+    }
+
+    const audio: HTMLAudioElement | undefined = motionManager.currentAudio;
+    const context: AudioContext | undefined = motionManager.currentContext;
+    const analyser: AnalyserNode | undefined = motionManager.currentAnalyzer;
+
+    if (!audio || !context || !analyser) {
+      console.warn('[MotionController] patchAudio: missing audio/context/analyser', {
+        hasAudio: !!audio,
+        hasContext: !!context,
+        hasAnalyser: !!analyser
+      });
+      return;
+    }
+
+    audio.volume = 1;
+
+    try {
+      analyser.disconnect();
+    } catch {
+      // ignore
+    }
+
+    if (lipsyncGainNode) {
+      try {
+        lipsyncGainNode.disconnect();
+      } catch {
+        // ignore
+      }
+      lipsyncGainNode = null;
+    }
+
+    const gainNode = context.createGain();
+    gainNode.gain.value = 0.001;
+    analyser.connect(gainNode);
+    gainNode.connect(context.destination);
+    lipsyncGainNode = gainNode;
+
+    console.info('[MotionController] patchAudio: lipsync gain node inserted', { outputGain: 0.001 });
+  } catch (e) {
+    console.warn('[MotionController] patchAudio failed', { error: e });
+  }
+}
+
+/** Stop speaking / lip sync. */
 export function stopSpeaking(): void {
+  // Stop framework-provided speak()
+  if (speakingModel && typeof speakingModel.stopSpeaking === 'function') {
+    try {
+      speakingModel.stopSpeaking();
+    } catch {
+      // ignore
+    }
+  }
+  // Stop fallback synthetic oscillation
   if (speakingInterval !== null) {
     window.clearInterval(speakingInterval);
     speakingInterval = null;
   }
-  // Explicitly reset mouth to closed so models without idle motion don't
-  // get stuck with a half-open mouth.
   if (speakingCoreModel && typeof speakingCoreModel.setParameterValueById === 'function') {
     try {
       speakingCoreModel.setParameterValueById('ParamMouthOpenY', 0);
-      console.info('[MotionController] SpeakStop mouth reset', { hadAudio: speakingAudioPath !== null });
     } catch {
       // Parameter may not exist — ignore
     }
   }
+  speakingModel = null;
   speakingCoreModel = null;
-  speakingAudioPath = null;
 }
 
 // ============================================================
-// WAV amplitude sampling
-//
-// Reads a WAV file, downsamples to one amplitude value per `intervalMs`,
-// normalized to 0..1. Returns [] on any error (caller falls back).
-// Supports 8/16/24/32-bit PCM and float32 WAV. Does NOT support mp3.
+// Path normalization for framework speak()
 // ============================================================
-
-async function readWavAmplitudeSamples(wavPath: string, intervalMs: number): Promise<number[]> {
-  // Resolve file:// path to fetchable URL. live2d-file:// is registered by main.
-  // Plain Windows paths are converted to live2d-file://local/...
-  const url = toFetchableUrl(wavPath);
-  const res = await fetch(url);
-  if (!res.ok) {
-    throw new Error(`fetch failed: ${res.status}`);
-  }
-  const buf = await res.arrayBuffer();
-  const view = new DataView(buf);
-
-  // Parse RIFF/WAVE header
-  if (view.byteLength < 44 ||
-      view.getUint32(0, false) !== 0x52494646 /* 'RIFF' */ ||
-      view.getUint32(8, false) !== 0x57415645 /* 'WAVE' */) {
-    throw new Error('not a RIFF/WAVE file');
-  }
-
-  // Walk chunks to find fmt and data
-  let offset = 12;
-  let audioFormat = 1;
-  let numChannels = 1;
-  let sampleRate = 44100;
-  let bitsPerSample = 16;
-  let dataOffset = -1;
-  let dataLength = 0;
-
-  while (offset + 8 <= view.byteLength) {
-    const chunkId = view.getUint32(offset, false);
-    const chunkSize = view.getUint32(offset + 4, true);
-    if (chunkId === 0x666d7420 /* 'fmt ' */) {
-      audioFormat = view.getUint16(offset + 8, true);
-      numChannels = view.getUint16(offset + 10, true);
-      sampleRate = view.getUint32(offset + 12, true);
-      bitsPerSample = view.getUint16(offset + 22, true);
-    } else if (chunkId === 0x64617461 /* 'data' */) {
-      dataOffset = offset + 8;
-      dataLength = chunkSize;
-      break;
-    }
-    offset += 8 + chunkSize + (chunkSize & 1);
-  }
-
-  if (dataOffset < 0 || dataLength <= 0) {
-    throw new Error('no data chunk');
-  }
-
-  const bytesPerSample = bitsPerSample / 8;
-  const frameSize = bytesPerSample * numChannels;
-  const totalFrames = Math.floor(dataLength / frameSize);
-  const durationMs = (totalFrames / sampleRate) * 1000;
-  const targetSampleCount = Math.max(1, Math.floor(durationMs / intervalMs));
-  const framesPerSample = Math.max(1, Math.floor(totalFrames / targetSampleCount));
-
-  const samples: number[] = [];
-  let peak = 0;
-
-  for (let s = 0; s < targetSampleCount; s++) {
-    let sum = 0;
-    let count = 0;
-    const startFrame = s * framesPerSample;
-    const endFrame = Math.min(totalFrames, startFrame + framesPerSample);
-    for (let f = startFrame; f < endFrame; f++) {
-      const byteOffset = dataOffset + f * frameSize;
-      // Average all channels for this frame
-      let v = 0;
-      for (let c = 0; c < numChannels; c++) {
-        v += readSample(view, byteOffset + c * bytesPerSample, bitsPerSample, audioFormat);
-      }
-      sum += Math.abs(v / numChannels);
-      count += 1;
-    }
-    const avg = count > 0 ? sum / count : 0;
-    samples.push(avg);
-    if (avg > peak) peak = avg;
-  }
-
-  // Normalize to 0..1 based on peak (avoid quiet clip being stuck at 0)
-  const normFactor = peak > 0.0001 ? 1 / peak : 1;
-  return samples.map(s => Math.min(1, s * normFactor));
-}
-
-function readSample(view: DataView, offset: number, bits: number, format: number): number {
-  try {
-    if (format === 3 /* IEEE float */ && bits === 32) {
-      return view.getFloat32(offset, true);
-    }
-    if (bits === 8) {
-      return (view.getUint8(offset) - 128) / 128;
-    }
-    if (bits === 16) {
-      return view.getInt16(offset, true) / 32768;
-    }
-    if (bits === 24) {
-      const b0 = view.getUint8(offset);
-      const b1 = view.getUint8(offset + 1);
-      const b2 = view.getInt8(offset + 2);
-      return ((b2 << 16) | (b1 << 8) | b0) / 8388608;
-    }
-    if (bits === 32) {
-      return view.getInt32(offset, true) / 2147483648;
-    }
-  } catch {
-    // out of bounds — return silence
-  }
-  return 0;
-}
 
 function toFetchableUrl(path: string): string {
   if (/^https?:\/\//i.test(path) || /^live2d-file:\/\//i.test(path) || /^file:\/\//i.test(path)) {

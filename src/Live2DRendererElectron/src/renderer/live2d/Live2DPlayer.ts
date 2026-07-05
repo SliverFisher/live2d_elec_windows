@@ -58,6 +58,103 @@ export class Live2DPlayer {
     return this.userScale;
   }
 
+  /**
+   * Compute the current model geometry in window-relative DIP coordinates
+   * (Pixi stage coords == window DIP coords because autoDensity + resolution
+   * = devicePixelRatio). Main process adds window bounds to convert these
+   * to screenDip before sending to AI_maid.
+   *
+   * Returns null if no model is loaded or bounds are unavailable.
+   */
+  getModelGeometry(): {
+    modelBounds: { x: number; y: number; width: number; height: number };
+    anchors: {
+      modelCenter: { x: number; y: number };
+      headTop: { x: number; y: number };
+      faceCenter: { x: number; y: number };
+      bodyCenter: { x: number; y: number };
+      feetCenter: { x: number; y: number };
+    };
+    parts: Array<{
+      id: string;
+      name: string;
+      visible: boolean;
+      bounds: { x: number; y: number; width: number; height: number };
+      anchor: { x: number; y: number };
+    }>;
+    scale: number;
+  } | null {
+    if (!this.model) {
+      return null;
+    }
+
+    let bounds: { x: number; y: number; width: number; height: number };
+    try {
+      bounds = this.model.getBounds();
+    } catch {
+      return null;
+    }
+
+    if (!Number.isFinite(bounds.width) || !Number.isFinite(bounds.height) ||
+        bounds.width <= 0 || bounds.height <= 0) {
+      return null;
+    }
+
+    const centerX = bounds.x + bounds.width / 2;
+    const topY = bounds.y;
+    const bottomY = bounds.y + bounds.height;
+
+    const anchors = {
+      modelCenter: { x: centerX, y: bounds.y + bounds.height / 2 },
+      headTop: { x: centerX, y: topY },
+      faceCenter: { x: centerX, y: bounds.y + bounds.height * 0.15 },
+      bodyCenter: { x: centerX, y: bounds.y + bounds.height * 0.5 },
+      feetCenter: { x: centerX, y: bottomY }
+    };
+
+    // Body part regions based on the existing resolveBodyPart normalizedY
+    // thresholds (head < 0.28, face < 0.45, body < 0.75, leg otherwise).
+    // Live has no explicit body part config — derive from model bounds.
+    const headEnd = bounds.y + bounds.height * 0.28;
+    const faceEnd = bounds.y + bounds.height * 0.45;
+    const bodyEnd = bounds.y + bounds.height * 0.75;
+
+    const makePart = (
+      id: string,
+      name: string,
+      yStart: number,
+      yEnd: number
+    ) => {
+      const partBounds = {
+        x: bounds.x,
+        y: yStart,
+        width: bounds.width,
+        height: yEnd - yStart
+      };
+      return {
+        id,
+        name,
+        visible: true,
+        bounds: partBounds,
+        anchor: { x: centerX, y: yStart + (yEnd - yStart) / 2 }
+      };
+    };
+
+    const parts = [
+      makePart('head', '头部', topY, headEnd),
+      makePart('face', '脸部', headEnd, faceEnd),
+      makePart('body', '身体', faceEnd, bodyEnd),
+      makePart('leg', '腿部', bodyEnd, bottomY)
+    ];
+
+    return {
+      modelBounds: bounds,
+      anchors,
+      parts,
+      scale: this.userScale
+    };
+  }
+
   clientToPixiPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     const screenWidth = this.canvasWidth || window.innerWidth || this.canvas.clientWidth;

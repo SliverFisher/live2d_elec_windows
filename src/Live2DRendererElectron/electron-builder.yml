@@ -2,17 +2,13 @@ appId: com.maidai.live2drenderer
 productName: Live2DRenderer
 asar: true
 directories:
-  output: ../../release/MaidAI/Live2DRenderer-new
+  output: dist
 files:
   - out/**
   - package.json
 extraResources:
   - from: vendor
     to: vendor
-    filter:
-      - "**/*"
-  - from: config
-    to: config
     filter:
       - "**/*"
 win:

@@ -12,6 +12,14 @@ let mainWindow: BrowserWindow | null = null;
 let parentPid: number | null = null;
 let pendingLoadModelRequestId: string | null = null;
 let pendingLoadModelPath: string | null = null;
+let isModelLoading = false;
+let queuedLoadModel: { command: LoadModelRendererCommand; requestId: string | null } | null = null;
+// Tracks the requestId of the most recent QueryModelGeometry so the
+// ModelGeometryResult from the renderer can be correlated and forwarded
+// back to AI_maid with the correct requestId. Single in-flight query is
+// sufficient — AI_maid is expected to wait for each response before
+// sending the next query.
+let pendingQueryGeometryRequestId: string | null = null;
 
 // Renderer readiness tracking — prevents LoadModel from being lost when it
 // arrives before the renderer process has finished loading.
@@ -20,6 +28,11 @@ let rendererReady = false;
 let pendingLoadModelCommand: { command: LoadModelRendererCommand; requestId: string | null } | null = null;
 let loadModelTimeoutTimer: NodeJS.Timeout | null = null;
 const LOAD_MODEL_TIMEOUT_MS = 10000;
+
+// Renderer crash auto-recovery — reload up to N times before giving up.
+// A successful reload resets the counter (tracked via did-finish-load).
+const MAX_RENDER_CRASH_RECOVERIES = 3;
+let renderCrashRecoveryAttempts = 0;
 
 let petDragState: {
   startCursorX: number;
@@ -120,21 +133,37 @@ export function createRendererWindow(): BrowserWindow {
   // Mark renderer as ready — any LoadModel that arrived before this point
   // was cached in pendingLoadModelCommand and is now flushed.
   mainWindow.webContents.on('did-finish-load', () => {
-    if (rendererReady) {
-      return;
-    }
-    rendererReady = true;
-    log('Renderer did-finish-load, rendererReady=true', {
-      visible: mainWindow?.isVisible(),
-      bounds: mainWindow?.getBounds()
-    });
+    if (!rendererReady) {
+      rendererReady = true;
+      log('Renderer did-finish-load, rendererReady=true', {
+        visible: mainWindow?.isVisible(),
+        bounds: mainWindow?.getBounds()
+      });
 
-    if (pendingLoadModelCommand) {
-      const { command, requestId } = pendingLoadModelCommand;
-      pendingLoadModelCommand = null;
-      log('Flushing pending LoadModel to renderer', { modelPath: command.modelPath, requestId });
-      sendCommandToRenderer(command);
-      startLoadModelTimeout(requestId, command.modelPath);
+      if (pendingLoadModelCommand) {
+        const { command, requestId } = pendingLoadModelCommand;
+        pendingLoadModelCommand = null;
+        log('Flushing pending LoadModel to renderer', { modelPath: command.modelPath, requestId });
+        sendCommandToRenderer(command);
+        startLoadModelTimeout(requestId, command.modelPath);
+      }
+    }
+
+    // If this load followed a crash recovery, reset the counter and re-show
+    // the window (it was hidden by hideWindowForCrash).
+    if (renderCrashRecoveryAttempts > 0) {
+      log('Renderer recovered from crash via reload', {
+        previousAttempts: renderCrashRecoveryAttempts
+      });
+      renderCrashRecoveryAttempts = 0;
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+        try {
+          mainWindow.showInactive();
+          log('Renderer window re-shown after recovery');
+        } catch (e) {
+          log('Failed to re-show window after recovery', { error: e });
+        }
+      }
     }
   });
 
@@ -151,6 +180,27 @@ export function createRendererWindow(): BrowserWindow {
       { type: 'Error', code: 'RenderProcessGone', message: `Renderer process gone: ${details.reason}` },
       null
     );
+    // Auto-recover: reload the renderer to bring the character back.
+    // Limit retries to avoid a crash loop — if it keeps crashing, give up
+    // and let AI_maid decide what to do.
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    renderCrashRecoveryAttempts += 1;
+    if (renderCrashRecoveryAttempts <= MAX_RENDER_CRASH_RECOVERIES) {
+      log('Attempting renderer recovery via reload', {
+        attempt: renderCrashRecoveryAttempts,
+        max: MAX_RENDER_CRASH_RECOVERIES
+      });
+      try {
+        mainWindow.webContents.reload();
+      } catch (e) {
+        log('Renderer reload failed', { error: e });
+      }
+    } else {
+      log('Renderer crash recovery limit reached, giving up', {
+        attempts: renderCrashRecoveryAttempts,
+        max: MAX_RENDER_CRASH_RECOVERIES
+      });
+    }
   });
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
@@ -397,8 +447,7 @@ function handleRendererEvent(event: RendererEvent): void {
         },
         pendingLoadModelRequestId
       );
-      pendingLoadModelRequestId = null;
-      pendingLoadModelPath = null;
+      processQueuedLoadModel();
       break;
     case 'ModelLoadFailed':
       clearLoadModelTimeout();
@@ -410,33 +459,185 @@ function handleRendererEvent(event: RendererEvent): void {
         },
         pendingLoadModelRequestId
       );
-      pendingLoadModelRequestId = null;
-      pendingLoadModelPath = null;
+      processQueuedLoadModel();
       break;
     case 'TransformChanged': {
-      // Renderer only knows scale + reason; fill in x/y from window bounds
+      // Renderer only knows scale + reason; fill in xDip/yDip/widthDip/heightDip
+      // from the actual window bounds so AI_maid gets the full picture.
+      // getBounds() returns DIP (Device Independent Pixels), not physical pixels.
+      // dpiScale is the display's monitor scaling factor (e.g. 1.25 on a
+      // 125% Windows DPI setting). xDip/yDip/widthDip/heightDip are DIPs;
+      // dpiScale lets consumers convert to physical pixels if needed.
       const bounds = mainWindow?.getBounds();
+      let dpiScale = 1;
+      if (bounds) {
+        try {
+          dpiScale = screen.getDisplayMatching(bounds).scaleFactor || 1;
+        } catch (e) {
+          log('Failed to get dpiScale for TransformChanged', { error: e });
+        }
+      }
       sendEvent(
         {
           type: 'TransformChanged',
-          x: bounds?.x ?? 0,
-          y: bounds?.y ?? 0,
+          xDip: bounds?.x ?? 0,
+          yDip: bounds?.y ?? 0,
+          widthDip: bounds?.width ?? 0,
+          heightDip: bounds?.height ?? 0,
           scale: event.scale,
+          dpiScale,
           reason: event.reason
         },
         null
       );
       break;
     }
+    case 'RightClick': {
+      // Enrich the screen-space click point with full display/window context.
+      // event.screenXDip/screenYDip (from the DOM event.screenX/Y) are DIP. Use
+      // Electron's screen.dipToScreenPoint to convert to physical pixels — do NOT
+      // multiply by scaleFactor manually, multi-monitor setups have per-display origins.
+      const windowBoundsDip = mainWindow?.getBounds();
+      let screenXPx = event.screenXDip;
+      let screenYPx = event.screenYDip;
+      let displayId = 0;
+      let displayScaleFactor = 1;
+      let displayBoundsDip = { x: 0, y: 0, width: 0, height: 0 };
+      let displayWorkAreaDip = { x: 0, y: 0, width: 0, height: 0 };
+      try {
+        const px = screen.dipToScreenPoint({ x: event.screenXDip, y: event.screenYDip });
+        screenXPx = px.x;
+        screenYPx = px.y;
+      } catch (e) {
+        log('Failed to convert DIP to screen px for RightClick', { error: e });
+      }
+      if (windowBoundsDip) {
+        try {
+          const display = screen.getDisplayMatching(windowBoundsDip);
+          displayId = display.id;
+          displayScaleFactor = display.scaleFactor || 1;
+          displayBoundsDip = display.bounds;
+          displayWorkAreaDip = display.workArea;
+        } catch (e) {
+          log('Failed to get display info for RightClick', { error: e });
+        }
+      }
+      sendEvent(
+        {
+          type: 'RightClick',
+          screenXDip: event.screenXDip,
+          screenYDip: event.screenYDip,
+          screenXPx,
+          screenYPx,
+          displayId,
+          displayScaleFactor,
+          displayBoundsDip,
+          displayWorkAreaDip,
+          windowBoundsDip: windowBoundsDip ?? { x: 0, y: 0, width: 0, height: 0 }
+        },
+        null
+      );
+      break;
+    }
     case 'PointerEvent':
-    case 'RightClick':
     case 'Error':
       sendEvent(event, null);
+      break;
+    case 'ModelGeometryResult':
+      handleModelGeometryResult(event);
       break;
     default:
       log('Unknown renderer event type', (event as { type: string }).type);
       break;
   }
+}
+
+/**
+ * Convert window-relative DIP coordinates from the renderer to screen DIP
+ * coordinates by adding the window's screen position, then forward the
+ * enriched ModelGeometryResult to AI_maid with the original requestId.
+ *
+ * If the window is unavailable, fall back to window origin (0,0).
+ */
+function handleModelGeometryResult(
+  event: Extract<RendererEvent, { type: 'ModelGeometryResult' }>
+): void {
+  const requestId = pendingQueryGeometryRequestId;
+  pendingQueryGeometryRequestId = null;
+
+  const windowBounds = mainWindow?.getBounds();
+  const offsetX = windowBounds?.x ?? 0;
+  const offsetY = windowBounds?.y ?? 0;
+
+  if (!event.ok) {
+    log('ModelGeometryResult (failure)', {
+      requestId,
+      code: event.code,
+      message: event.message
+    });
+    sendEvent(
+      {
+        type: 'ModelGeometryResult',
+        ok: false,
+        roleId: event.roleId,
+        coordinateSpace: 'screenDip',
+        code: event.code,
+        message: event.message
+      },
+      requestId
+    );
+    return;
+  }
+
+  const shiftPoint = (p: { x: number; y: number }) => ({
+    x: p.x + offsetX,
+    y: p.y + offsetY
+  });
+  const shiftBounds = (b: { x: number; y: number; width: number; height: number }) => ({
+    x: b.x + offsetX,
+    y: b.y + offsetY,
+    width: b.width,
+    height: b.height
+  });
+
+  const modelBounds = event.modelBounds ? shiftBounds(event.modelBounds) : undefined;
+  const anchors = event.anchors ? {
+    modelCenter: shiftPoint(event.anchors.modelCenter),
+    headTop: shiftPoint(event.anchors.headTop),
+    faceCenter: shiftPoint(event.anchors.faceCenter),
+    bodyCenter: shiftPoint(event.anchors.bodyCenter),
+    feetCenter: shiftPoint(event.anchors.feetCenter)
+  } : undefined;
+  const parts = event.parts?.map((p) => ({
+    id: p.id,
+    name: p.name,
+    visible: p.visible,
+    bounds: p.bounds ? shiftBounds(p.bounds) : undefined,
+    anchor: p.anchor ? shiftPoint(p.anchor) : undefined
+  }));
+
+  const responsePayload = {
+    type: 'ModelGeometryResult' as const,
+    ok: true,
+    roleId: event.roleId,
+    coordinateSpace: 'screenDip' as const,
+    modelBounds,
+    anchors,
+    parts,
+    scale: event.scale
+  };
+
+  log('ModelGeometryResult (success) sending to WPF', {
+    requestId,
+    roleId: event.roleId,
+    modelBounds,
+    anchors,
+    partsCount: parts?.length ?? 0,
+    parts,
+    scale: event.scale
+  });
+
+  sendEvent(responsePayload, requestId);
 }
 
 // ============================================================
@@ -483,6 +684,16 @@ export function handleAiMaidCommand(command: AiMaidCommand, requestId: string | 
       }
       app.quit();
       break;
+    case 'Shutdown':
+      log('Shutdown command received', { reason: command.reason });
+      // Shutdown = immediate termination, no Closed event sent back (the
+      // host already knows it's shutting us down).
+      closeProtocol('ShutdownCommand');
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.close();
+      }
+      app.quit();
+      break;
     case 'SetTransform':
       handleSetTransform(command, requestId);
       break;
@@ -490,6 +701,9 @@ export function handleAiMaidCommand(command: AiMaidCommand, requestId: string | 
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.setIgnoreMouseEvents(command.enabled, command.enabled ? { forward: true } : undefined);
       }
+      break;
+    case 'QueryModelGeometry':
+      handleQueryModelGeometry(command, requestId);
       break;
     case 'PlayMotion':
     case 'SetExpression':
@@ -527,6 +741,31 @@ function handleInit(command: { protocolVersion: number; appName: string; parentP
 
   log('Init successful', { appName: command.appName, parentPid: command.parentPid });
   sendEvent({ type: 'InitAck', ok: true }, requestId);
+
+  // Proactively push the initial window transform so AI_maid receives
+  // the current bounds right after init (mirrors TransformChanged format).
+  const initBounds = mainWindow?.getBounds();
+  let initDpiScale = 1;
+  if (initBounds) {
+    try {
+      initDpiScale = screen.getDisplayMatching(initBounds).scaleFactor || 1;
+    } catch (e) {
+      log('Failed to get dpiScale for init transform', { error: e });
+    }
+  }
+  sendEvent(
+    {
+      type: 'TransformChanged',
+      xDip: initBounds?.x ?? 0,
+      yDip: initBounds?.y ?? 0,
+      widthDip: initBounds?.width ?? 0,
+      heightDip: initBounds?.height ?? 0,
+      scale: 1,
+      dpiScale: initDpiScale,
+      reason: 'init'
+    },
+    null
+  );
 }
 
 function handleLoadModel(
@@ -545,21 +784,6 @@ function handleLoadModel(
     return;
   }
 
-  // Track the requestId so we can attach it to ModelLoaded/ModelLoadFailed
-  pendingLoadModelRequestId = requestId;
-  pendingLoadModelPath = command.modelPath;
-
-  // Apply initial window position if provided
-  if (command.initialTransform && typeof command.initialTransform.x === 'number' && typeof command.initialTransform.y === 'number') {
-    const bounds = mainWindow.getBounds();
-    mainWindow.setBounds({
-      x: Math.round(command.initialTransform.x),
-      y: Math.round(command.initialTransform.y),
-      width: bounds.width,
-      height: bounds.height
-    }, false);
-  }
-
   const rendererCommand: LoadModelRendererCommand = {
     type: 'LoadModel',
     roleId: command.roleId,
@@ -567,17 +791,58 @@ function handleLoadModel(
     initialTransform: command.initialTransform
   };
 
-  // If renderer is not ready yet, cache the command and wait for did-finish-load.
-  // This is the critical fix for "LoadModel lost" when AI_maid sends it
-  // immediately after Init, before the renderer process has booted.
+  if (isModelLoading) {
+    log('LoadModel queued (another load in progress)', {
+      modelPath: command.modelPath,
+      requestId,
+      currentModelPath: pendingLoadModelPath
+    });
+    queuedLoadModel = { command: rendererCommand, requestId };
+    return;
+  }
+
+  startModelLoad(rendererCommand, requestId);
+}
+
+function startModelLoad(
+  rendererCommand: LoadModelRendererCommand,
+  requestId: string | null
+): void {
+  isModelLoading = true;
+  pendingLoadModelRequestId = requestId;
+  pendingLoadModelPath = rendererCommand.modelPath;
+
+  if (rendererCommand.initialTransform && typeof rendererCommand.initialTransform.x === 'number' && typeof rendererCommand.initialTransform.y === 'number') {
+    const bounds = mainWindow!.getBounds();
+    mainWindow!.setBounds({
+      x: Math.round(rendererCommand.initialTransform.x),
+      y: Math.round(rendererCommand.initialTransform.y),
+      width: bounds.width,
+      height: bounds.height
+    }, false);
+  }
+
   if (!rendererReady) {
-    log('Renderer not ready yet, caching LoadModel', { modelPath: command.modelPath, requestId });
+    log('Renderer not ready yet, caching LoadModel', { modelPath: rendererCommand.modelPath, requestId });
     pendingLoadModelCommand = { command: rendererCommand, requestId };
     return;
   }
 
   sendCommandToRenderer(rendererCommand);
-  startLoadModelTimeout(requestId, command.modelPath);
+  startLoadModelTimeout(requestId, rendererCommand.modelPath);
+}
+
+function processQueuedLoadModel(): void {
+  isModelLoading = false;
+  pendingLoadModelRequestId = null;
+  pendingLoadModelPath = null;
+
+  if (queuedLoadModel) {
+    const next = queuedLoadModel;
+    queuedLoadModel = null;
+    log('Processing queued LoadModel', { modelPath: next.command.modelPath, requestId: next.requestId });
+    startModelLoad(next.command, next.requestId);
+  }
 }
 
 /**
@@ -610,8 +875,7 @@ function startLoadModelTimeout(requestId: string | null, modelPath: string): voi
       },
       requestId
     );
-    pendingLoadModelRequestId = null;
-    pendingLoadModelPath = null;
+    processQueuedLoadModel();
   }, LOAD_MODEL_TIMEOUT_MS);
 }
 
@@ -644,6 +908,74 @@ function handleSetTransform(command: { x: number; y: number; scale: number }, re
   sendCommandToRenderer(rendererCommand);
   // requestId is not used for response here — TransformChanged is spontaneous
   void requestId;
+}
+
+/**
+ * Handle QueryModelGeometry: forward the query to the renderer and remember
+ * the requestId so the renderer's ModelGeometryResult can be correlated and
+ * sent back to AI_maid with the correct requestId.
+ *
+ * The renderer returns window-relative DIP coordinates; the
+ * handleModelGeometryResult function adds the window's screen position to
+ * convert them to screenDip before forwarding to AI_maid.
+ */
+function handleQueryModelGeometry(
+  command: { roleId?: string; includeParts?: boolean; includeAnchors?: boolean },
+  requestId: string | null
+): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    log('QueryModelGeometry: window unavailable', { requestId });
+    sendEvent(
+      {
+        type: 'ModelGeometryResult',
+        ok: false,
+        coordinateSpace: 'screenDip',
+        code: 'RendererNotReady',
+        message: 'renderer window is not available'
+      },
+      requestId
+    );
+    return;
+  }
+
+  if (!rendererReady) {
+    log('QueryModelGeometry: renderer not ready', { requestId });
+    sendEvent(
+      {
+        type: 'ModelGeometryResult',
+        ok: false,
+        coordinateSpace: 'screenDip',
+        code: 'RendererNotReady',
+        message: 'renderer is not ready yet'
+      },
+      requestId
+    );
+    return;
+  }
+
+  // Overwrite any previously pending query — AI_maid should wait for each
+  // response before sending another, but if it doesn't, the latest wins.
+  if (pendingQueryGeometryRequestId !== null) {
+    log('QueryModelGeometry: replacing in-flight query', {
+      previousRequestId: pendingQueryGeometryRequestId,
+      newRequestId: requestId
+    });
+  }
+  pendingQueryGeometryRequestId = requestId;
+
+  const rendererCommand: RendererCommand = {
+    type: 'QueryModelGeometry',
+    roleId: command.roleId,
+    includeParts: command.includeParts,
+    includeAnchors: command.includeAnchors
+  };
+  sendCommandToRenderer(rendererCommand);
+  log('QueryModelGeometry forwarded to renderer', {
+    requestId,
+    roleId: command.roleId,
+    includeParts: command.includeParts,
+    includeAnchors: command.includeAnchors
+  });
 }
 
 function forwardToRenderer(command: AiMaidCommand): void {

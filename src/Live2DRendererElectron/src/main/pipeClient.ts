@@ -4,6 +4,7 @@ import { makeEnvelope } from './protocolTypes';
 import { log } from './logger';
 
 type CommandHandler = (command: AiMaidCommand, requestId: string | null) => void;
+type DisconnectHandler = (reason: string) => void;
 
 /**
  * Error codes that indicate the peer (AI_maid) has gone away or the pipe is
@@ -39,14 +40,14 @@ function isPipeDisconnectError(err: unknown): boolean {
 export class PipeClient {
   private pipePath: string;
   private connected = false;
-  private reconnectTimer: NodeJS.Timeout | null = null;
   private commandHandler: CommandHandler | null = null;
+  private disconnectHandler: DisconnectHandler | null = null;
   private netClient: Socket | null = null;
   private buffer = '';
   /**
    * Once we have observed a clean disconnect (Close command, host exit,
-   * EPIPE/ECONNRESET), we stop trying to send anything else and stop
-   * scheduling reconnects. The host is gone — Live should exit quietly.
+   * EPIPE/ECONNRESET), we stop trying to send anything else. The host is
+   * gone — Live should exit quietly via the disconnect handler.
    */
   private detached = false;
 
@@ -57,6 +58,19 @@ export class PipeClient {
 
   onCommand(handler: CommandHandler): void {
     this.commandHandler = handler;
+  }
+
+  /**
+   * Register a handler that fires once when the pipe disconnects unexpectedly
+   * (EPIPE, socket close, socket end after a successful connection). The
+   * handler should trigger app.quit() — Live must not linger as a ghost
+   * window after its WPF host is gone.
+   *
+   * Not fired for intentional close() calls (Close/Shutdown commands), since
+   * those already drive their own app.quit().
+   */
+  onDisconnect(handler: DisconnectHandler): void {
+    this.disconnectHandler = handler;
   }
 
   async connect(): Promise<void> {
@@ -83,16 +97,20 @@ export class PipeClient {
         client.on('error', (err: Error & { code?: string }) => {
           if (isPipeDisconnectError(err)) {
             // Expected when AI_maid exits — do NOT log as error, do NOT
-            // let it propagate. Mark disconnected and stop writing.
+            // let it propagate.
             log('PipeClient pipe disconnected (expected)', {
               code: err.code,
               message: err.message
             });
-            this.markDisconnected();
             if (!this.connected) {
               // Was never connected — reject the initial connect promise
               // so callers know, but treat it as a clean disconnect.
+              this.markDisconnected();
               reject(err);
+            } else {
+              // Was connected, now disconnected — WPF is gone. Trigger
+              // app.quit() via the disconnect handler.
+              this.notifyDisconnect(`pipe error: ${err.code}`);
             }
             return;
           }
@@ -102,19 +120,28 @@ export class PipeClient {
             reject(err);
           }
           this.markDisconnected();
-          this.scheduleReconnect();
         });
 
         client.on('close', () => {
           log('PipeClient closed', { pipePath: this.pipePath });
-          this.markDisconnected();
-          this.scheduleReconnect();
+          if (this.detached) return;
+          if (this.connected) {
+            // Unexpected close after successful connection — WPF gone.
+            this.notifyDisconnect('pipe closed');
+          } else {
+            this.markDisconnected();
+          }
         });
 
         client.on('end', () => {
           log('PipeClient ended', { pipePath: this.pipePath });
-          this.markDisconnected();
-          this.scheduleReconnect();
+          if (this.detached) return;
+          if (this.connected) {
+            // WPF closed its write end — treat as disconnect.
+            this.notifyDisconnect('pipe ended');
+          } else {
+            this.markDisconnected();
+          }
         });
       } catch (e) {
         log('PipeClient connect failed', e);
@@ -140,37 +167,34 @@ export class PipeClient {
 
   /**
    * Mark the client as permanently detached — host is gone, stop trying
-   * to send or reconnect. Used after receiving an explicit Close command
-   * or after observing an EPIPE-family error.
+   * to send. Used after receiving an explicit Close/Shutdown command or
+   * after observing a pipe disconnect.
    */
   detach(reason: string): void {
     if (this.detached) return;
     this.detached = true;
     log('PipeClient detached', { reason });
     this.markDisconnected();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
   }
 
-  private scheduleReconnect(): void {
-    if (this.detached) {
-      // Host is gone — do not attempt to reconnect.
-      return;
-    }
-    if (this.reconnectTimer) {
-      return;
-    }
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      if (!this.connected && !this.detached) {
-        log('PipeClient attempting reconnect', { pipePath: this.pipePath });
-        void this.connect().catch(() => {
-          // Error already logged; will retry
-        });
+  /**
+   * Called when the pipe disconnects unexpectedly (EPIPE, socket close,
+   * socket end) after a successful connection. Detaches the client and
+   * fires the disconnect handler once, which should trigger app.quit().
+   *
+   * Idempotent: if detach() was already called (e.g. intentional Close),
+   * this is a no-op — the disconnect handler will NOT fire.
+   */
+  private notifyDisconnect(reason: string): void {
+    if (this.detached) return;
+    this.detach(reason);
+    if (this.disconnectHandler) {
+      try {
+        this.disconnectHandler(reason);
+      } catch (e) {
+        log('PipeClient disconnect handler error', e);
       }
-    }, 2000);
+    }
   }
 
   private handleData(chunk: string): void {
@@ -238,6 +262,7 @@ export class PipeClient {
     }
     const envelope = makeEnvelope(payload, requestId);
     const line = JSON.stringify(envelope) + '\n';
+    log('PipeClient sendEvent', { type: envelope.type, requestId: envelope.requestId });
     this.write(line);
   }
 

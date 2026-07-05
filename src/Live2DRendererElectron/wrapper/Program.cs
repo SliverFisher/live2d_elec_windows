@@ -1,52 +1,49 @@
 using System.Diagnostics;
-using System.Text;
 
-Console.InputEncoding = new UTF8Encoding(false);
-Console.OutputEncoding = new UTF8Encoding(false);
-Console.SetError(new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)) { AutoFlush = true });
-
-// Live2DRenderer.exe is a thin .NET wrapper that launches the Electron host
-// (Live2DRendererHost.exe) and transparently forwards the AI_maid Named Pipe
-// protocol arguments. The wrapper does NOT create its own pipes — all
-// protocol traffic flows directly between AI_maid and the Electron host.
-//
-// Supported arguments (forwarded to the host):
-//   --pipe-name <name>       Named Pipe to connect (AI_maid mode)
-//   --parent-pid <pid>       Parent process PID to watch for exit
-//   --log-dir <dir>          Log output directory
-//   --model <path>           Dev/debug model path
-//   --no-default-model       Skip loading any default model
-//
-// When --pipe-name is NOT provided, the wrapper enters debug mode and will
-// auto-load a default model (unless --no-default-model is given), so running
-// the exe standalone still shows the character.
+var logPath = Path.Combine(AppContext.BaseDirectory, "wrapper-start.txt");
+File.WriteAllText(logPath, string.Join(Environment.NewLine,
+    $"Time: {DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}",
+    $"PID: {Process.GetCurrentProcess().Id}",
+    $"CWD: {Environment.CurrentDirectory}",
+    $"Args: [{string.Join(", ", args)}]",
+    $"BaseDir: {AppContext.BaseDirectory}"
+));
 
 var baseDirectory = AppContext.BaseDirectory;
 var hostPath = Path.Combine(baseDirectory, "Live2DRendererHost.exe");
 
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 1: hostPath={hostPath}");
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 2: hostExists={File.Exists(hostPath)}");
+
 if (!File.Exists(hostPath))
 {
-    Console.Error.WriteLine($"Live2DRendererHost.exe was not found: {hostPath}");
+    File.AppendAllText(logPath, $"{Environment.NewLine}Step ERROR: host not found");
     return 2;
 }
 
-// Parse arguments
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 3: parsing args");
+
 var pipeName = GetArgValue(args, "--pipe-name");
 var parentPid = GetArgValue(args, "--parent-pid");
 var logDir = GetArgValue(args, "--log-dir");
 var explicitModel = GetArgValue(args, "--model");
 var noDefaultModel = args.Any(arg => string.Equals(arg, "--no-default-model", StringComparison.OrdinalIgnoreCase));
 
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 4: pipeName={pipeName}, parentPid={parentPid}, logDir={logDir}");
+
 var isAiMaidMode = !string.IsNullOrWhiteSpace(pipeName);
 
-// Resolve startup model path (only used in debug mode, or as a fallback hint)
-// In AI_maid mode, model loading is driven by the LoadModel command, so we
-// do NOT auto-inject a model path.
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 5: isAiMaidMode={isAiMaidMode}");
+
 string? startupModelPath = null;
 if (!isAiMaidMode && !noDefaultModel)
 {
     startupModelPath = ResolveStartupModelPath(explicitModel, baseDirectory);
 }
+
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 6: startupModelPath={startupModelPath}");
+
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 7: creating Process");
 
 using var host = new Process();
 host.StartInfo.FileName = hostPath;
@@ -57,7 +54,8 @@ host.StartInfo.RedirectStandardError = true;
 host.StartInfo.RedirectStandardOutput = true;
 host.StartInfo.RedirectStandardInput = true;
 
-// Forward protocol arguments to the Electron host
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 8: setting arguments");
+
 if (!string.IsNullOrWhiteSpace(pipeName))
 {
     host.StartInfo.ArgumentList.Add("--pipe-name");
@@ -76,7 +74,6 @@ if (!string.IsNullOrWhiteSpace(logDir))
     host.StartInfo.ArgumentList.Add(logDir);
 }
 
-// In debug mode (no --pipe-name), pass --model so the host auto-loads it
 if (!isAiMaidMode && !string.IsNullOrWhiteSpace(startupModelPath))
 {
     host.StartInfo.ArgumentList.Add("--model");
@@ -88,10 +85,12 @@ if (noDefaultModel)
     host.StartInfo.ArgumentList.Add("--no-default-model");
 }
 
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 9: starting host process");
+
 host.Start();
 
-// Pipe stdin/stdout/stderr through transparently.
-// The wrapper does NOT interpret the JSON Lines protocol — bytes flow as-is.
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 10: host started, PID={host.Id}");
+
 var stdinTask = Task.Run(async () =>
 {
     try
@@ -117,17 +116,25 @@ var stdoutTask = Task.Run(async () =>
 
 var stderrTask = Task.Run(async () =>
 {
-    string? line;
-    while ((line = await host.StandardError.ReadLineAsync()) is not null)
+    try
     {
-        Console.Error.WriteLine(line);
+        var stderr = Console.OpenStandardError();
+        using var writer = new System.IO.StreamWriter(stderr) { AutoFlush = true };
+        string? line;
+        while ((line = await host.StandardError.ReadLineAsync()) is not null)
+        {
+            await writer.WriteLineAsync(line);
+        }
     }
+    catch { }
 });
 
-await host.WaitForExitAsync();
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 11: waiting for host exit");
 
-// Give pipes a moment to flush
-await Task.WhenAny(Task.WhenAll(stdoutTask, stderrTask), Task.Delay(500));
+await host.WaitForExitAsync();
+await Task.WhenAny(Task.WhenAll(stdinTask, stdoutTask, stderrTask), Task.Delay(500));
+
+File.AppendAllText(logPath, $"{Environment.NewLine}Step 12: host exited, exitCode={host.ExitCode}");
 
 return host.ExitCode;
 
