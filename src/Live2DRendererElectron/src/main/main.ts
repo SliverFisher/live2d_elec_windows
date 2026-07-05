@@ -1,4 +1,4 @@
-﻿import { app, protocol } from 'electron';
+import { app, protocol } from 'electron';
 import { createRendererWindow, handleHostCommand, registerWindowIpc } from './windowManager';
 import { log } from './logger';
 import { startNamedPipeProtocol, startStdioProtocol } from './stdioProtocol';
@@ -20,6 +20,11 @@ protocol.registerSchemesAsPrivileged([
 
 app.whenReady().then(() => {
   log('Renderer starting');
+  log('Env check', {
+    isPackaged: app.isPackaged,
+    electronRendererUrl: process.env.ELECTRON_RENDERER_URL || 'NOT SET',
+    appPath: app.getAppPath()
+  });
   registerWindowIpc();
   startCommandProtocol();
   createRendererWindow();

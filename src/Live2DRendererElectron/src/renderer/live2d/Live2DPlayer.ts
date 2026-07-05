@@ -1,14 +1,15 @@
-import { Application, Container, extensions } from 'pixi.js';
+import { Application, Container, Ticker } from 'pixi.js';
+import type { Live2DModel as Live2DModelType } from 'pixi-live2d-display-lipsyncpatch/cubism4';
 import { assertModelJson } from './modelLoader';
 
-type CubismEngineModule = typeof import('untitled-pixi-live2d-engine/cubism');
+let Live2DModel: typeof Live2DModelType | null = null;
 
 type LoadedLive2DModel = Container & {
   width: number;
   height: number;
   x: number;
   y: number;
-  scale: { set: (value: number) => void };
+  scale: { set: (x: number, y?: number) => void; x: number; y: number };
   anchor: { set: (x: number, y: number) => void };
   children: unknown[];
   getBounds: () => { x: number; y: number; width: number; height: number };
@@ -20,25 +21,7 @@ type LoadedLive2DModel = Container & {
     originalHeight?: number;
   };
   motion: (group: string, index?: number) => Promise<unknown>;
-  expression: (name: string) => Promise<unknown> | boolean;
-};
-
-type CoreModelLike = {
-  getDrawableCount?: () => number;
-  getDrawableRenderOrders?: () => ArrayLike<number> | undefined;
-  getDrawableDynamicFlagIsVisible?: (drawableIndex: number) => boolean;
-  getDrawableDynamicFlagVertexPositionsDidChange?: (drawableIndex: number) => boolean;
-  getModel?: () => {
-    drawables?: {
-      renderOrders?: ArrayLike<number>;
-      drawOrders?: ArrayLike<number>;
-      renderOrder?: ArrayLike<number>;
-      drawOrder?: ArrayLike<number>;
-      dynamicFlags?: ArrayLike<number>;
-      opacities?: ArrayLike<number>;
-      textureIndices?: ArrayLike<number>;
-    };
-  };
+  expression: (name: string | number) => void;
 };
 
 const MIN_USER_SCALE = 0.2;
@@ -50,13 +33,13 @@ const INITIAL_WINDOW_PADDING = 24;
 export class Live2DPlayer {
   private app: Application;
   private model: LoadedLive2DModel | null = null;
+  private live2dModel: Live2DModelType | null = null;
   private userScale = 1;
   private baseFitScale = 1;
   private baseModelWidth = 0;
   private baseModelHeight = 0;
   private cubismCoreLoaded = false;
   private pixiInitialized = false;
-  private cubismEngine: CubismEngineModule | null = null;
   private gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
   private lastPlacementLogAt = 0;
   private baseFitCalculated = false;
@@ -64,7 +47,7 @@ export class Live2DPlayer {
   private canvasHeight = 0;
 
   constructor(private readonly canvas: HTMLCanvasElement) {
-    this.app = new Application();
+    this.app = null as unknown as Application;
   }
 
   get currentModel(): LoadedLive2DModel | null {
@@ -101,31 +84,84 @@ export class Live2DPlayer {
   }
 
   async loadModel(modelUrl: string, cubismCoreUrl: string): Promise<void> {
+    console.info('[Live2D] ' + JSON.stringify({
+      event: 'loadModel_start',
+      modelUrl,
+      cubismCoreUrl
+    }));
+
     await this.ensureCubismCore(cubismCoreUrl);
-    const { Live2DModel } = await this.ensureCubismEngine();
     await this.initializePixi();
+
+    const modelJsonResponse = await fetch(modelUrl);
+    const modelJson = await modelJsonResponse.json();
+
+    console.info('[Live2D] Version info: ' + JSON.stringify({
+      pixiVersion: (Application as any).VERSION || (window as any).PIXI?.VERSION || 'unknown',
+      engine: 'pixi-live2d-display-lipsyncpatch',
+      cubismCoreVersion: (window as any).Live2DCubismCore?.Version?.csmGetVersion?.() ?? 'unknown',
+      modelJsonVersion: modelJson.Version,
+      modelUrl,
+      mocFile: modelJson.FileReferences?.Moc,
+      textureFiles: modelJson.FileReferences?.Textures,
+      physicsFile: modelJson.FileReferences?.Physics,
+      poseFile: modelJson.FileReferences?.Pose
+    }));
+
     await assertModelJson(modelUrl);
 
     if (this.model) {
       this.app.stage.removeChild(this.model);
       this.model.destroy({ children: true });
       this.model = null;
+      this.live2dModel = null;
     }
 
     this.baseFitCalculated = false;
     this.userScale = 1;
 
-    const model = await Live2DModel.from(modelUrl, {
-      autoHitTest: false,
-      autoFocus: false,
-      ticker: this.app.ticker,
-      useHighPrecisionMask: 'auto'
-    }) as LoadedLive2DModel;
+    const live2dModel = await Live2DModel!.from(modelUrl, {
+      ticker: this.app.ticker
+    });
 
-    this.model = model;
-    this.app.stage.addChild(model);
-    this.applyCubismCore6DrawableCompatibility(model);
-    this.calcBaseFit();
+    this.live2dModel = live2dModel;
+    this.app.stage.addChild(live2dModel);
+
+    const anyLive2dModel = live2dModel as any;
+    const internalModel = anyLive2dModel.internalModel;
+
+    console.info('[Live2D] Model loaded: ' + JSON.stringify({
+      hasInternalModel: !!internalModel,
+      hasCoreModel: !!internalModel?.coreModel,
+      textureCount: (live2dModel as any).textures?.length ?? 0,
+      texturesValid: (live2dModel as any).textures?.map((t: any) => t?.valid ?? false),
+      cubismCoreVersion: (window as any).Live2DCubismCore?.Version?.csmGetVersion?.() ?? 'unknown'
+    }));
+
+    this.ensureEnoughMaskRenderTextures(internalModel);
+
+    const originalWidth = (live2dModel as any).internalModel?.width || live2dModel.width || 0;
+    const originalHeight = (live2dModel as any).internalModel?.height || live2dModel.height || 0;
+
+    console.info('[Live2D] Model state after load: ' + JSON.stringify({
+      modelWidth: live2dModel.width,
+      modelHeight: live2dModel.height,
+      modelX: live2dModel.x,
+      modelY: live2dModel.y,
+      modelScaleX: live2dModel.scale.x,
+      modelScaleY: live2dModel.scale.y,
+      modelVisible: live2dModel.visible,
+      modelAlpha: live2dModel.alpha,
+      internalWidth: originalWidth,
+      internalHeight: originalHeight,
+      bounds: live2dModel.getBounds()
+    }));
+
+    const wrappedModel = this.wrapModel(live2dModel, originalWidth, originalHeight);
+    this.model = wrappedModel;
+
+    this.dumpModelInfo(modelJson, originalWidth, originalHeight);
+    this.calcBaseFit(originalWidth, originalHeight);
     this.applyTransform('loadModel');
   }
 
@@ -185,17 +221,96 @@ export class Live2DPlayer {
     return pixel[3] > HIT_ALPHA_THRESHOLD;
   }
 
+  private ensureEnoughMaskRenderTextures(internalModel: any): void {
+    const renderer = internalModel?.renderer;
+    const coreModel = internalModel?.coreModel;
+    if (!renderer || !coreModel) {
+      return;
+    }
+
+    const drawableCount = coreModel.getDrawableCount?.() ?? 0;
+    if (drawableCount <= 0) {
+      return;
+    }
+
+    let totalClips = 0;
+    const clipIdSets: Set<string> = new Set();
+    for (let i = 0; i < drawableCount; i++) {
+      const maskCount = coreModel.getDrawableMaskCounts?.(i) ?? 0;
+      if (maskCount > 0) {
+        const masks = coreModel.getDrawableMasks?.(i);
+        if (masks) {
+          const key = Array.from(masks).slice(0, maskCount).sort().join(',');
+          clipIdSets.add(key);
+        }
+        totalClips++;
+      }
+    }
+
+    const clipGroupCount = clipIdSets.size || totalClips;
+    const currentCount = renderer.getRenderTextureCount?.() ?? 1;
+    const defaultMax = 36;
+    const perExtra = 32;
+    let neededCount = 1;
+    if (clipGroupCount > defaultMax) {
+      neededCount = Math.ceil((clipGroupCount - defaultMax) / perExtra) + 1;
+    }
+
+    console.info('[Live2D] Mask stats: ' + JSON.stringify({
+      drawableCount,
+      totalMaskedDrawables: totalClips,
+      uniqueClipGroups: clipIdSets.size,
+      currentRenderTextureCount: currentCount,
+      neededRenderTextureCount: neededCount
+    }));
+
+    if (neededCount > currentCount && typeof renderer.initialize === 'function') {
+      console.info('[Live2D] Re-initializing renderer with maskBufferCount = ' + neededCount);
+      try {
+        const oldTextures = renderer._textures;
+        renderer.initialize(coreModel, neededCount);
+        if (oldTextures) {
+          for (let i = 0; i < oldTextures.length; i++) {
+            if (oldTextures[i]) {
+              renderer.bindTexture(i, oldTextures[i]);
+            }
+          }
+        }
+        console.info('[Live2D] Renderer re-initialized successfully');
+      } catch (e) {
+        console.error('[Live2D] Failed to re-initialize renderer:', e);
+      }
+    }
+  }
+
+  private wrapModel(live2dModel: Live2DModelType, originalWidth: number, originalHeight: number): LoadedLive2DModel {
+    const model = live2dModel as unknown as LoadedLive2DModel;
+
+    const originalMotion = (live2dModel as any).motion;
+    model.motion = async (group: string, index?: number) => {
+      return originalMotion.call(live2dModel, group, index ?? 0, 2);
+    };
+
+    const originalExpression = (live2dModel as any).expression;
+    model.expression = (name: string | number) => {
+      void originalExpression.call(live2dModel, name);
+    };
+
+    return model;
+  }
+
   private async initializePixi(): Promise<void> {
     if (this.pixiInitialized) {
       return;
     }
 
-    await this.app.init({
-      canvas: this.canvas,
-      preference: 'webgl',
+    Live2DModel!.registerTicker(Ticker);
+
+    this.app = new Application({
+      view: this.canvas as HTMLCanvasElement,
+      backgroundAlpha: 0,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
-      backgroundAlpha: 0,
       preserveDrawingBuffer: true
     });
 
@@ -216,20 +331,8 @@ export class Live2DPlayer {
     });
   }
 
-  private async ensureCubismEngine(): Promise<CubismEngineModule> {
-    if (this.cubismEngine) {
-      return this.cubismEngine;
-    }
-
-    const engine = await import('untitled-pixi-live2d-engine/cubism');
-    engine.configureCubismSDK({ memorySizeMB: 64 });
-    extensions.add(engine.Live2DPlugin);
-    this.cubismEngine = engine;
-    return engine;
-  }
-
-  private calcBaseFit(): void {
-    if (!this.model || !this.app.renderer || this.baseFitCalculated) {
+  private calcBaseFit(originalWidth: number, originalHeight: number): void {
+    if (this.baseFitCalculated) {
       return;
     }
 
@@ -239,33 +342,35 @@ export class Live2DPlayer {
       return;
     }
 
-    const originalWidth = this.model.internalModel?.originalWidth ?? this.model.internalModel?.width ?? 0;
-    const originalHeight = this.model.internalModel?.originalHeight ?? this.model.internalModel?.height ?? 0;
-
-    this.model.anchor.set(0.5, 0.5);
-    this.model.x = screenWidth / 2;
-    this.model.y = screenHeight / 2;
+    if (this.live2dModel) {
+      this.live2dModel.anchor.set(0.5, 0.5);
+      this.live2dModel.x = screenWidth / 2;
+      this.live2dModel.y = screenHeight / 2;
+    }
 
     if (originalWidth > 0 && originalHeight > 0) {
       this.baseModelWidth = originalWidth;
       this.baseModelHeight = originalHeight;
       const baseScale = Math.min(screenWidth / originalWidth, screenHeight / originalHeight);
       this.baseFitScale = Number.isFinite(baseScale) && baseScale > 0 ? baseScale : 1;
-    } else {
-      this.model.scale.set(1);
-      const bounds = this.model.getBounds();
-      this.baseModelWidth = bounds.width;
-      this.baseModelHeight = bounds.height;
-      const baseScale = Math.min(screenWidth / bounds.width, screenHeight / bounds.height);
-      this.baseFitScale = Number.isFinite(baseScale) && baseScale > 0 ? baseScale : 1;
+    } else if (this.live2dModel) {
+      const bounds = this.live2dModel.getBounds();
+      if (bounds) {
+        this.baseModelWidth = bounds.width;
+        this.baseModelHeight = bounds.height;
+        const baseScale = Math.min(screenWidth / bounds.width, screenHeight / bounds.height);
+        this.baseFitScale = Number.isFinite(baseScale) && baseScale > 0 ? baseScale : 1;
+      }
     }
 
-    this.model.scale.set(this.baseFitScale * this.userScale);
+    if (this.live2dModel) {
+      this.live2dModel.scale.set(this.baseFitScale * this.userScale);
+    }
     this.baseFitCalculated = true;
   }
 
   private applyTransform(source: string): void {
-    if (!this.model || !this.app.renderer) {
+    if (!this.live2dModel || !this.app.renderer) {
       return;
     }
 
@@ -276,15 +381,15 @@ export class Live2DPlayer {
     }
 
     const nextScale = this.baseFitScale * this.userScale;
-    this.model.scale.set(nextScale);
-    this.model.x = screenWidth / 2;
-    this.model.y = screenHeight / 2;
+    this.live2dModel.scale.set(nextScale);
+    this.live2dModel.x = screenWidth / 2;
+    this.live2dModel.y = screenHeight / 2;
 
     this.logModelPlacement(nextScale);
   }
 
   private async ensureCubismCore(cubismCoreUrl: string): Promise<void> {
-    if (this.cubismCoreLoaded || window.Live2DCubismCore) {
+    if (this.cubismCoreLoaded || (window as any).Live2DCubismCore) {
       this.cubismCoreLoaded = true;
       return;
     }
@@ -298,9 +403,12 @@ export class Live2DPlayer {
       document.head.appendChild(script);
     });
 
-    if (!window.Live2DCubismCore) {
+    if (!(window as any).Live2DCubismCore) {
       throw new Error('Cubism Core initialization failed: Live2DCubismCore global was not found.');
     }
+
+    const module = await import('pixi-live2d-display-lipsyncpatch/cubism4');
+    Live2DModel = module.Live2DModel;
 
     this.cubismCoreLoaded = true;
   }
@@ -317,7 +425,7 @@ export class Live2DPlayer {
     this.lastPlacementLogAt = now;
 
     const bounds = this.model.getBounds();
-    console.info('Live2D model placement ' + JSON.stringify({
+    console.info('[Live2D] Model placement ' + JSON.stringify({
       rendererWidth: this.app.renderer.width,
       rendererHeight: this.app.renderer.height,
       modelWidth: this.model.width,
@@ -338,82 +446,14 @@ export class Live2DPlayer {
     }));
   }
 
-  private applyCubismCore6DrawableCompatibility(model: LoadedLive2DModel): void {
-    const coreModel = (model.internalModel as { coreModel?: CoreModelLike } | undefined)?.coreModel;
-    if (!coreModel?.getModel || !coreModel.getDrawableCount) {
-      return;
-    }
-
-    const drawables = coreModel.getModel().drawables;
-    if (!drawables) {
-      return;
-    }
-
-    const drawableCount = coreModel.getDrawableCount();
-    const currentRenderOrders = drawables.renderOrders ? Array.from(drawables.renderOrders) : [];
-    const hasValidRenderRanks =
-      currentRenderOrders.length === drawableCount &&
-      new Set(currentRenderOrders).size === drawableCount &&
-      currentRenderOrders.every((order) => Number.isInteger(order) && order >= 0 && order < drawableCount);
-
-    if (!hasValidRenderRanks) {
-      drawables.renderOrders = this.createRenderRanks(drawables.drawOrders ?? drawables.renderOrder ?? drawables.drawOrder, drawableCount);
-    }
-
-    const getDrawableRenderOrders = coreModel.getDrawableRenderOrders?.bind(coreModel);
-    coreModel.getDrawableRenderOrders = () => getDrawableRenderOrders?.() ?? drawables.renderOrders;
-
-    const getDrawableDynamicFlagIsVisible = coreModel.getDrawableDynamicFlagIsVisible?.bind(coreModel);
-    const getDrawableDynamicFlagVertexPositionsDidChange = coreModel.getDrawableDynamicFlagVertexPositionsDidChange?.bind(coreModel);
-    let visibleCount = 0;
-
-    for (let index = 0; index < drawableCount; index++) {
-      if (getDrawableDynamicFlagIsVisible?.(index)) {
-        visibleCount++;
-      }
-    }
-
-    coreModel.getDrawableDynamicFlagIsVisible = (drawableIndex: number) => {
-      return visibleCount === 0 ? true : Boolean(getDrawableDynamicFlagIsVisible?.(drawableIndex));
-    };
-
-    coreModel.getDrawableDynamicFlagVertexPositionsDidChange = (drawableIndex: number) => {
-      return getDrawableDynamicFlagVertexPositionsDidChange?.(drawableIndex) ?? true;
-    };
-
-    const opacities = Array.from(drawables.opacities ?? []);
-    const opacityPositiveCount = opacities.filter((opacity) => opacity > 0.001).length;
-    const opacityMax = opacities.length > 0 ? Math.max(...opacities) : null;
-    const opacityMin = opacities.length > 0 ? Math.min(...opacities) : null;
-    const textureIndices = Array.from(drawables.textureIndices ?? []);
-
-    console.info('Live2D drawable compatibility ' + JSON.stringify({
-      drawableCount,
-      visibleCount,
-      hasDynamicFlags: Boolean(drawables.dynamicFlags),
-      firstDynamicFlags: Array.from(drawables.dynamicFlags ?? []).slice(0, 8),
-      firstOpacities: opacities.slice(0, 8),
-      opacityMin,
-      opacityMax,
-      opacityPositiveCount,
-      firstTextureIndices: textureIndices.slice(0, 8),
-      textureIndexMin: textureIndices.length > 0 ? Math.min(...textureIndices) : null,
-      textureIndexMax: textureIndices.length > 0 ? Math.max(...textureIndices) : null,
-      firstRenderOrders: Array.from(drawables.renderOrders ?? []).slice(0, 8)
+  private dumpModelInfo(modelJson: any, originalWidth: number, originalHeight: number): void {
+    console.info('[Live2D] Model info: ' + JSON.stringify({
+      engine: 'pixi-live2d-display-lipsyncpatch (Cubism 4)',
+      modelWidth: originalWidth,
+      modelHeight: originalHeight,
+      textureCount: modelJson?.FileReferences?.Textures?.length,
+      hasPhysics: !!modelJson?.FileReferences?.Physics,
+      hasPose: !!modelJson?.FileReferences?.Pose
     }));
-  }
-
-  private createRenderRanks(drawOrders: ArrayLike<number> | undefined, drawableCount: number): Int32Array {
-    const sortedDrawableIndices = Array.from({ length: drawableCount }, (_, index) => index).sort((left, right) => {
-      const leftOrder = drawOrders?.[left] ?? left;
-      const rightOrder = drawOrders?.[right] ?? right;
-      return leftOrder === rightOrder ? left - right : leftOrder - rightOrder;
-    });
-
-    const renderRanks = new Int32Array(drawableCount);
-    sortedDrawableIndices.forEach((drawableIndex, rank) => {
-      renderRanks[drawableIndex] = rank;
-    });
-    return renderRanks;
   }
 }

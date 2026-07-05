@@ -1,4 +1,4 @@
-﻿import { BrowserWindow, app, ipcMain, protocol, screen } from 'electron';
+import { BrowserWindow, app, ipcMain, protocol, screen } from 'electron';
 import { extname, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -41,7 +41,7 @@ export function createRendererWindow(): BrowserWindow {
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  if (!app.isPackaged && process.env.ELECTRON_RENDERER_URL) {
+  if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
@@ -164,7 +164,9 @@ export function registerWindowIpc(): void {
   });
 
   ipcMain.handle('get-cubism-core-url', () => {
-    const base = app.isPackaged ? process.resourcesPath : app.getAppPath();
+    const base = process.env.ELECTRON_RENDERER_URL
+      ? app.getAppPath()
+      : process.resourcesPath;
     return toLive2DFileUrl(resolve(base, 'vendor', 'CubismSdkForWeb', 'Core', 'live2dcubismcore.min.js'));
   });
 

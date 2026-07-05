@@ -1,4 +1,4 @@
-﻿import './styles/app.css';
+import './styles/app.css';
 import type { HostCommand } from '../main/protocolTypes';
 import { Live2DPlayer } from './live2d/Live2DPlayer';
 import { playMotion, setExpression } from './live2d/motionController';
@@ -331,7 +331,7 @@ function setStatus(message: string): void {
 async function initDevModel(): Promise<void> {
   try {
     setStatus('Dev mode: auto-loading model...');
-    // Use an absolute path pointing to the 符玄 model in assests/
+    // Use an absolute path pointing to the huohuo model in assests/
     const modelPath = 'c:/Users/49213/Desktop/A/codex/Live/assests/live2d/符玄/符玄.model3.json';
     const [modelUrl, cubismCoreUrl] = await Promise.all([
       window.live2dRenderer.resolveModelUrl(modelPath),

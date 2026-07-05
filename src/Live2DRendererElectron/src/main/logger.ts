@@ -1,4 +1,4 @@
-﻿import { app } from 'electron';
+import { app } from 'electron';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
@@ -22,9 +22,11 @@ export function log(message: string, details?: unknown): void {
   const line = `[${new Date().toISOString()}] ${message}${details === undefined ? '' : ` ${formatDetails(details)}`}\n`;
   try {
     appendFileSync(getLogFilePath(), line, 'utf8');
-  } catch {
+  } catch (e) {
+    process.stderr.write(`[LOG ERROR] ${e}\n`);
     process.stderr.write(line);
   }
+  process.stdout.write(`[LOG] ${line}`);
 }
 
 function formatDetails(details: unknown): string {
