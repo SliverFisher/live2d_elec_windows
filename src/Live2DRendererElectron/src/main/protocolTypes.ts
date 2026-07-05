@@ -43,6 +43,7 @@ export type AiMaidCommand =
       type: 'SpeakStart';
       text?: string;
       voiceId?: string;
+      audioPath?: string;
       estimatedDurationMs?: number;
     }
   | { type: 'SpeakStop'; reason?: string }
@@ -66,6 +67,7 @@ export type RendererEventPayload =
       normalizedX: number;
       normalizedY: number;
       hitAreaName?: string;
+      bodyPart: 'head' | 'face' | 'hair' | 'body' | 'hand' | 'leg' | 'other';
       button: string;
     }
   | { type: 'RightClick'; screenX: number; screenY: number }
@@ -87,7 +89,7 @@ export type RendererCommand =
   | { type: 'PlayMotion'; group: string; index?: number; fallbackAction?: string }
   | { type: 'SetExpression'; name: string; durationMs?: number }
   | { type: 'SetActionTag'; actionTag: string; durationMs?: number }
-  | { type: 'SpeakStart'; text?: string; estimatedDurationMs?: number }
+  | { type: 'SpeakStart'; text?: string; audioPath?: string; estimatedDurationMs?: number }
   | { type: 'SpeakStop' }
   | { type: 'SetTransform'; scale: number };
 
@@ -108,6 +110,7 @@ export type RendererEvent =
       normalizedX: number;
       normalizedY: number;
       hitAreaName?: string;
+      bodyPart: 'head' | 'face' | 'hair' | 'body' | 'hand' | 'leg' | 'other';
       button: string;
     }
   | { type: 'RightClick'; screenX: number; screenY: number }

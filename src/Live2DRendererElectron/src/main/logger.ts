@@ -4,6 +4,21 @@ import { dirname, resolve } from 'node:path';
 let logFilePath: string | null = null;
 let logDirOverride: string | null = null;
 
+/**
+ * Write to process.stderr without ever throwing.
+ * Writes can throw EPIPE if the parent process has exited and the stderr
+ * pipe is broken — we must not let that propagate as an uncaught exception
+ * (Electron would pop a JS error dialog).
+ */
+function safeStderrWrite(text: string): void {
+  try {
+    process.stderr.write(text);
+  } catch {
+    // EPIPE / ECONNRESET / ERR_STREAM_DESTROYED — silently ignore.
+    // There is nothing we can do; the parent is gone.
+  }
+}
+
 /** Set the log directory (from --log-dir argument). Must be called before first log(). */
 export function setLogDir(dir: string): void {
   logDirOverride = resolve(dir);
@@ -38,11 +53,11 @@ export function log(message: string, details?: unknown): void {
   try {
     appendFileSync(getLogFilePath(), line, 'utf8');
   } catch (e) {
-    process.stderr.write(`[LOG ERROR] ${e}\n`);
-    process.stderr.write(line);
+    safeStderrWrite(`[LOG ERROR] ${e}\n`);
+    safeStderrWrite(line);
   }
   // Also echo to stderr (NOT stdout — stdout may be used for protocol fallback)
-  process.stderr.write(`[LOG] ${line}`);
+  safeStderrWrite(`[LOG] ${line}`);
 }
 
 function formatDetails(details: unknown): string {

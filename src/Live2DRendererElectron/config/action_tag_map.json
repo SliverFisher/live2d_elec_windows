@@ -1,0 +1,167 @@
+{
+  "_comment": "actionTag -> motion/expression mapping. Each actionTag can specify motionGroups[] and expressions[] as candidate lists; Live tries them in order. Missing entries degrade to fallback. motionGroups/expressions that do not exist on the model are silently ignored.",
+  "_comment_motionGroups": "Covers common naming across: official Cubism demos, B站 free models, mihoyo (符玄/huohuo), VTube Studio exports, Live2D Sample (Hiyori/Mark/Rice/etc).",
+  "_comment_shorthand": "motionGroup/expression (singular) are shorthand for single-element lists, kept for backward compatibility.",
+  "_comment_fallback": "fallback points to another actionTag name (not a motion group). Chain ends at idle.",
+  "_comment_mouth": "mouth=true enables mouth oscillation (synthetic or WAV-driven). Used by 'speak'.",
+
+  "idle": {
+    "expressions": ["idle", "default", "normal", "neutral"],
+    "fallback": "idle"
+  },
+
+  "smile": {
+    "expressions": ["smile", "happy", "joy", "grin"],
+    "fallback": "idle"
+  },
+
+  "happy": {
+    "motionGroups": ["Happy", "Joy", "Laugh", "Smile"],
+    "expressions": ["happy", "smile", "joy", "grin"],
+    "fallback": "smile"
+  },
+
+  "shy": {
+    "motionGroups": ["Shy", "Embarrassed", "Blush"],
+    "expressions": ["shy", "embarrassed", "blush", "ashamed"],
+    "fallback": "smile"
+  },
+
+  "angry": {
+    "motionGroups": ["Angry", "Mad", "Angry01", "Fury"],
+    "expressions": ["angry", "mad", "annoyed", "fury"],
+    "fallback": "annoyed"
+  },
+
+  "annoyed": {
+    "motionGroups": ["Annoyed", "Irritated", "Displeased"],
+    "expressions": ["annoyed", "irritated", "displeased", "angry"],
+    "fallback": "idle"
+  },
+
+  "sleepy": {
+    "motionGroups": ["Sleep", "Sleepy", "Yawn", "Tired", "Sleepy01"],
+    "expressions": ["sleepy", "sleep", "tired", "yawn"],
+    "fallback": "idle"
+  },
+
+  "think": {
+    "motionGroups": ["Think", "Thinking", "Wonder", "Ponder"],
+    "expressions": ["think", "thinking", "wonder", "ponder"],
+    "fallback": "idle"
+  },
+
+  "wave": {
+    "motionGroups": ["Wave", "Greet", "Hello", "Greeting", "Wave01"],
+    "expressions": ["smile", "happy", "joy"],
+    "fallback": "smile"
+  },
+
+  "nod": {
+    "motionGroups": ["Nod", "Yes", "Agree", "Nodding"],
+    "expressions": ["smile", "happy"],
+    "fallback": "smile"
+  },
+
+  "speak": {
+    "expressions": ["smile", "talk", "speaking", "happy"],
+    "mouth": true,
+    "fallback": "idle"
+  },
+
+  "touch_head": {
+    "motionGroups": ["TapHead", "Tap", "Head", "TouchHead", "Pet", "PatHead", "TapHead01"],
+    "expressions": ["happy", "smile", "surprised", "joy"],
+    "fallback": "smile"
+  },
+
+  "touch_body": {
+    "motionGroups": ["TapBody", "Tap", "Body", "TouchBody", "TapBody01"],
+    "expressions": ["annoyed", "surprised", "shy", "embarrassed"],
+    "fallback": "smile"
+  },
+
+  "error": {
+    "expressions": ["annoyed", "angry", "sad", "displeased"],
+    "fallback": "idle"
+  },
+
+  "surprised": {
+    "motionGroups": ["Surprise", "Surprised", "Shock", "Surprised01"],
+    "expressions": ["surprised", "shock", "wow"],
+    "fallback": "smile"
+  },
+
+  "sad": {
+    "motionGroups": ["Sad", "Sorrow", "Down"],
+    "expressions": ["sad", "sorrow", "down", "depressed"],
+    "fallback": "idle"
+  },
+
+  "cry": {
+    "motionGroups": ["Cry", "Sad", "Weep"],
+    "expressions": ["cry", "sad", "weeping"],
+    "fallback": "sad"
+  },
+
+  "laugh": {
+    "motionGroups": ["Laugh", "Happy", "Joy", "Laugh01"],
+    "expressions": ["laugh", "happy", "smile", "joy"],
+    "fallback": "happy"
+  },
+
+  "greet": {
+    "motionGroups": ["Wave", "Greet", "Hello", "Greeting"],
+    "expressions": ["smile", "happy"],
+    "fallback": "wave"
+  },
+
+  "wink": {
+    "motionGroups": ["Wink", "Wink01", "Blink"],
+    "expressions": ["wink", "smile", "happy"],
+    "fallback": "smile"
+  },
+
+  "dance": {
+    "motionGroups": ["Dance", "Dancing", "Dance01"],
+    "expressions": ["happy", "smile", "joy"],
+    "fallback": "happy"
+  },
+
+  "sing": {
+    "motionGroups": ["Sing", "Singing"],
+    "expressions": ["smile", "happy", "joy"],
+    "mouth": true,
+    "fallback": "speak"
+  },
+
+  "nod_yes": {
+    "motionGroups": ["Nod", "Yes", "Agree"],
+    "expressions": ["smile", "happy"],
+    "fallback": "nod"
+  },
+
+  "shake_no": {
+    "motionGroups": ["Shake", "No", "Deny", "ShakeHead"],
+    "expressions": ["annoyed", "displeased"],
+    "fallback": "annoyed"
+  },
+
+  "bored": {
+    "motionGroups": ["Bored", "Boredom"],
+    "expressions": ["bored", "annoyed", "tired"],
+    "fallback": "annoyed"
+  },
+
+  "curious": {
+    "motionGroups": ["Curious", "Wonder", "Question"],
+    "expressions": ["curious", "wonder", "think"],
+    "fallback": "think"
+  },
+
+  "proud": {
+    "motionGroups": ["Proud", "Confident", "Smug"],
+    "expressions": ["proud", "confident", "smug", "smile"],
+    "fallback": "smile"
+  }
+}

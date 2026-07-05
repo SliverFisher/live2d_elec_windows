@@ -11,6 +11,10 @@ extraResources:
     to: vendor
     filter:
       - "**/*"
+  - from: config
+    to: config
+    filter:
+      - "**/*"
 win:
   executableName: Live2DRenderer
   signAndEditExecutable: false

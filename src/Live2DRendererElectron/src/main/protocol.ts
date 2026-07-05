@@ -10,6 +10,7 @@ export type CommandRouter = (command: AiMaidCommand, requestId: string | null) =
 let transport: 'pipe' | 'stdio' | 'none' = 'none';
 let pipeClient: PipeClient | null = null;
 let stdioWriter: ((line: string) => void) | null = null;
+let stdioDetached = false;
 
 /**
  * Start the protocol transport based on startup args.
@@ -43,9 +44,30 @@ function startPipe(pipeName: string, router: CommandRouter): void {
   });
 }
 
+/**
+ * Write a line to stdout without ever throwing.
+ * EPIPE is expected when the parent (mock client / AI_maid) has exited;
+ * letting it propagate would crash Electron with a JS error dialog.
+ */
+function safeStdoutWrite(line: string): void {
+  if (stdioDetached) return;
+  try {
+    process.stdout.write(line);
+  } catch (e) {
+    const code = (e as { code?: string }).code;
+    if (code === 'EPIPE' || code === 'ECONNRESET' || code === 'ERR_STREAM_DESTROYED' || code === 'ERR_STREAM_WRITE_AFTER_END') {
+      // Parent is gone — detach so we never try to write again.
+      stdioDetached = true;
+      log('stdio write EPIPE ignored, detaching writer', { code });
+    } else {
+      log('stdio write failed', { code, message: (e as Error).message });
+    }
+  }
+}
+
 function startStdio(router: CommandRouter): void {
   transport = 'stdio';
-  stdioWriter = (line) => process.stdout.write(line);
+  stdioWriter = safeStdoutWrite;
 
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -67,6 +89,23 @@ function startStdio(router: CommandRouter): void {
     if (buffer.trim()) {
       processStdioLine(buffer.trim(), router);
       buffer = '';
+    }
+    // Parent closed stdin — detach so we stop trying to write
+    stdioDetached = true;
+    log('stdio stdin ended, detaching writer');
+  });
+
+  process.stdin.on('error', (err: Error & { code?: string }) => {
+    log('stdio stdin error', { code: err.code, message: err.message });
+    stdioDetached = true;
+  });
+
+  process.stdout.on('error', (err: Error & { code?: string }) => {
+    if (err.code === 'EPIPE' || err.code === 'ECONNRESET' || err.code === 'ERR_STREAM_DESTROYED') {
+      stdioDetached = true;
+      log('stdio stdout EPIPE ignored, detaching writer', { code: err.code });
+    } else {
+      log('stdio stdout error', { code: err.code, message: err.message });
     }
   });
 
@@ -112,26 +151,32 @@ function processStdioLine(line: string, router: CommandRouter): void {
  * Send an event to AI_maid.
  * Uses requestId from the originating command for response events,
  * or null for spontaneous events.
+ *
+ * If the transport is detached (host gone / EPIPE), this is a silent no-op.
  */
 export function sendEvent(payload: RendererEventPayload, requestId: string | null): void {
-  const envelope = makeEnvelope(payload, requestId);
-  const line = JSON.stringify(envelope) + '\n';
-
   if (transport === 'pipe' && pipeClient) {
     pipeClient.sendEvent(payload, requestId);
-  } else if (transport === 'stdio' && stdioWriter) {
+  } else if (transport === 'stdio' && stdioWriter && !stdioDetached) {
+    const envelope = makeEnvelope(payload, requestId);
+    const line = JSON.stringify(envelope) + '\n';
     stdioWriter(line);
   } else {
     log('sendEvent: no transport available', { type: payload.type });
   }
 }
 
-/** Send a Closed event and close the transport. */
+/**
+ * Send a Closed event and close the transport.
+ * If the pipe is already detached, the Closed event is silently dropped
+ * (there is nobody to receive it anyway).
+ */
 export function closeProtocol(reason: string): void {
   sendEvent({ type: 'Closed', reason }, null);
   if (pipeClient) {
     pipeClient.close();
     pipeClient = null;
   }
+  stdioDetached = true;
   transport = 'none';
 }

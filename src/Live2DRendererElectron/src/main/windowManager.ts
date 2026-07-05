@@ -3,7 +3,7 @@ import { extname, join, resolve } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { sendEvent } from './protocol';
+import { sendEvent, closeProtocol } from './protocol';
 import { log } from './logger';
 import { parseStartupArgs } from './args';
 import type { AiMaidCommand, RendererCommand, RendererEvent } from './protocolTypes';
@@ -31,6 +31,14 @@ let petDragState: {
 } | null = null;
 
 export function createRendererWindow(): BrowserWindow {
+  log('BrowserWindow create start', {
+    transparent: true,
+    frame: false,
+    backgroundColor: '#00000000',
+    show: false,
+    ELECTRON_RENDERER_URL: process.env.ELECTRON_RENDERER_URL || 'NOT SET'
+  });
+
   mainWindow = new BrowserWindow({
     width: 720,
     height: 900,
@@ -55,16 +63,34 @@ export function createRendererWindow(): BrowserWindow {
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
+  log('BrowserWindow created', {
+    id: mainWindow.id,
+    visible: mainWindow.isVisible(),
+    bounds: mainWindow.getBounds()
+  });
+
   if (process.env.ELECTRON_RENDERER_URL) {
     void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+    log('Loading renderer from ELECTRON_RENDERER_URL', { url: process.env.ELECTRON_RENDERER_URL });
   } else {
-    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
+    const filePath = join(__dirname, '../renderer/index.html');
+    void mainWindow.loadFile(filePath);
+    log('Loading renderer from file', { filePath });
   }
 
   mainWindow.once('ready-to-show', () => {
+    // Page has rendered its first frame — safe to show now without flashing white.
+    log('BrowserWindow ready-to-show', {
+      id: mainWindow?.id,
+      visible: mainWindow?.isVisible(),
+      bounds: mainWindow?.getBounds()
+    });
     mainWindow?.center();
     mainWindow?.showInactive();
-    log('Window created successfully');
+    log('BrowserWindow shown (showInactive)', {
+      id: mainWindow?.id,
+      visible: mainWindow?.isVisible()
+    });
   });
 
   mainWindow.on('will-resize', (event, newBounds) => {
@@ -74,9 +100,17 @@ export function createRendererWindow(): BrowserWindow {
     }
   });
 
+  mainWindow.on('show', () => {
+    log('BrowserWindow event: show', { id: mainWindow?.id });
+  });
+
+  mainWindow.on('hide', () => {
+    log('BrowserWindow event: hide', { id: mainWindow?.id });
+  });
+
   mainWindow.on('closed', () => {
     mainWindow = null;
-    log('Window closed');
+    log('BrowserWindow event: closed');
   });
 
   mainWindow.webContents.on('console-message', (event) => {
@@ -90,7 +124,10 @@ export function createRendererWindow(): BrowserWindow {
       return;
     }
     rendererReady = true;
-    log('Renderer did-finish-load, rendererReady=true');
+    log('Renderer did-finish-load, rendererReady=true', {
+      visible: mainWindow?.isVisible(),
+      bounds: mainWindow?.getBounds()
+    });
 
     if (pendingLoadModelCommand) {
       const { command, requestId } = pendingLoadModelCommand;
@@ -102,7 +139,14 @@ export function createRendererWindow(): BrowserWindow {
   });
 
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
-    log('Renderer process gone', details);
+    log('Renderer process gone', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      visible: mainWindow?.isVisible(),
+      bounds: mainWindow?.getBounds()
+    });
+    // Hide the window immediately so we don't leave a frozen white frame on screen.
+    hideWindowForCrash('RenderProcessGone');
     sendEvent(
       { type: 'Error', code: 'RenderProcessGone', message: `Renderer process gone: ${details.reason}` },
       null
@@ -110,14 +154,59 @@ export function createRendererWindow(): BrowserWindow {
   });
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
-    log('Renderer load failed', { errorCode, errorDescription, validatedURL });
+    log('Renderer load failed', {
+      errorCode,
+      errorDescription,
+      validatedURL,
+      visible: mainWindow?.isVisible(),
+      bounds: mainWindow?.getBounds()
+    });
+    // Hide the window so a half-loaded white page is not left on screen.
+    hideWindowForCrash('LoadFailed');
     sendEvent(
       { type: 'Error', code: 'LoadFailed', message: `Renderer load failed: ${errorDescription}` },
       null
     );
   });
 
+  // Unresponsive renderer can also leave a frozen white frame.
+  mainWindow.webContents.on('unresponsive', () => {
+    log('Renderer unresponsive', {
+      visible: mainWindow?.isVisible(),
+      bounds: mainWindow?.getBounds()
+    });
+    hideWindowForCrash('Unresponsive');
+    sendEvent(
+      { type: 'Error', code: 'Unresponsive', message: 'Renderer process became unresponsive' },
+      null
+    );
+  });
+
   return mainWindow;
+}
+
+/**
+ * Hide the main window when the renderer crashes or fails to load.
+ *
+ * This is the primary defense against the "white frame" issue: a transparent,
+ * frameless BrowserWindow with no renderer output is invisible, but a
+ * half-loaded or crashed renderer page can paint a white background.
+ *
+ * We hide (not destroy) so that the AI_maid host can still receive the Error
+ * event and decide to restart Live or fall back to image mode.
+ */
+function hideWindowForCrash(reason: string): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    log('hideWindowForCrash: window already destroyed', { reason });
+    return;
+  }
+  try {
+    const wasVisible = mainWindow.isVisible();
+    mainWindow.hide();
+    log('hideWindowForCrash: window hidden', { reason, wasVisible });
+  } catch (e) {
+    log('hideWindowForCrash: failed to hide', { reason, error: e });
+  }
 }
 
 export function registerWindowIpc(): void {
@@ -225,6 +314,19 @@ export function registerWindowIpc(): void {
       model: args.model,
       noDefaultModel: args.noDefaultModel
     };
+  });
+
+  ipcMain.handle('get-action-tag-map-url', () => {
+    // Resolve config/action_tag_map.json. In dev mode use the project's
+    // config dir; when packaged use resourcesPath/config.
+    const devConfigPath = resolve(__dirname, '..', '..', 'config', 'action_tag_map.json');
+    const packagedConfigPath = resolve(process.resourcesPath, 'config', 'action_tag_map.json');
+    const configPath = existsSync(devConfigPath)
+      ? devConfigPath
+      : existsSync(packagedConfigPath)
+        ? packagedConfigPath
+        : devConfigPath; // fall back to dev path even if missing — caller will handle 404
+    return toLive2DFileUrl(configPath);
   });
 }
 
@@ -353,17 +455,29 @@ export function handleAiMaidCommand(command: AiMaidCommand, requestId: string | 
       break;
     case 'Show':
       if (mainWindow && !mainWindow.isDestroyed()) {
+        log('Show command', { wasVisible: mainWindow.isVisible() });
         mainWindow.showInactive();
+        log('Show command done', { isVisible: mainWindow.isVisible(), bounds: mainWindow.getBounds() });
+      } else {
+        log('Show command: window unavailable');
       }
       break;
     case 'Hide':
       if (mainWindow && !mainWindow.isDestroyed()) {
+        log('Hide command', { wasVisible: mainWindow.isVisible() });
         mainWindow.hide();
+        log('Hide command done', { isVisible: mainWindow.isVisible() });
+      } else {
+        log('Hide command: window unavailable');
       }
       break;
     case 'Close':
       log('Close command received', { reason: command.reason });
+      // Send Closed first while the pipe is still alive, then detach so any
+      // subsequent renderer events (during window teardown) are silently
+      // dropped instead of throwing EPIPE.
       sendEvent({ type: 'Closed', reason: command.reason ?? 'AI_maidClose' }, null);
+      closeProtocol('AI_maidClose');
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.close();
       }
@@ -572,6 +686,7 @@ function forwardToRenderer(command: AiMaidCommand): void {
       rendererCommand = {
         type: 'SpeakStart',
         text: command.text,
+        audioPath: command.audioPath,
         estimatedDurationMs: command.estimatedDurationMs
       };
       break;

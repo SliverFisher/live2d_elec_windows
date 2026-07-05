@@ -6,6 +6,28 @@ import { log } from './logger';
 type CommandHandler = (command: AiMaidCommand, requestId: string | null) => void;
 
 /**
+ * Error codes that indicate the peer (AI_maid) has gone away or the pipe is
+ * broken. These are NOT real errors from our perspective — they are the
+ * expected signal that the host process exited. We treat them as a clean
+ * disconnect and never let them bubble as uncaught exceptions (which would
+ * make Electron pop its default JS error dialog).
+ */
+const PIPE_DISCONNECT_CODES = new Set<string>([
+  'EPIPE',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ERR_STREAM_DESTROYED',
+  'ERR_STREAM_WRITE_AFTER_END',
+  'ERR_STREAM_PREMATURE_CLOSE'
+]);
+
+function isPipeDisconnectError(err: unknown): boolean {
+  if (!err) return false;
+  const code = (err as { code?: string }).code;
+  return !!code && PIPE_DISCONNECT_CODES.has(code);
+}
+
+/**
  * Named Pipe JSON Lines client.
  *
  * Connects to a Windows Named Pipe created by AI_maid and exchanges
@@ -21,6 +43,12 @@ export class PipeClient {
   private commandHandler: CommandHandler | null = null;
   private netClient: Socket | null = null;
   private buffer = '';
+  /**
+   * Once we have observed a clean disconnect (Close command, host exit,
+   * EPIPE/ECONNRESET), we stop trying to send anything else and stop
+   * scheduling reconnects. The host is gone — Live should exit quietly.
+   */
+  private detached = false;
 
   constructor(pipeName: string) {
     // Windows named pipe path: \\.\pipe\<name>
@@ -52,24 +80,40 @@ export class PipeClient {
           this.handleData(data.toString('utf8'));
         });
 
-        client.on('error', (err: Error) => {
-          log('PipeClient error', { message: err.message });
+        client.on('error', (err: Error & { code?: string }) => {
+          if (isPipeDisconnectError(err)) {
+            // Expected when AI_maid exits — do NOT log as error, do NOT
+            // let it propagate. Mark disconnected and stop writing.
+            log('PipeClient pipe disconnected (expected)', {
+              code: err.code,
+              message: err.message
+            });
+            this.markDisconnected();
+            if (!this.connected) {
+              // Was never connected — reject the initial connect promise
+              // so callers know, but treat it as a clean disconnect.
+              reject(err);
+            }
+            return;
+          }
+
+          log('PipeClient error', { code: err.code, message: err.message });
           if (!this.connected) {
             reject(err);
           }
-          this.connected = false;
+          this.markDisconnected();
           this.scheduleReconnect();
         });
 
         client.on('close', () => {
           log('PipeClient closed', { pipePath: this.pipePath });
-          this.connected = false;
+          this.markDisconnected();
           this.scheduleReconnect();
         });
 
         client.on('end', () => {
           log('PipeClient ended', { pipePath: this.pipePath });
-          this.connected = false;
+          this.markDisconnected();
           this.scheduleReconnect();
         });
       } catch (e) {
@@ -79,13 +123,48 @@ export class PipeClient {
     });
   }
 
+  /**
+   * Mark the client as disconnected and tear down the socket.
+   * Subsequent sendEvent calls become silent no-ops (only file log).
+   */
+  private markDisconnected(): void {
+    this.connected = false;
+    if (this.netClient) {
+      try {
+        this.netClient.destroy();
+      } catch {
+        // ignore — socket may already be destroyed
+      }
+    }
+  }
+
+  /**
+   * Mark the client as permanently detached — host is gone, stop trying
+   * to send or reconnect. Used after receiving an explicit Close command
+   * or after observing an EPIPE-family error.
+   */
+  detach(reason: string): void {
+    if (this.detached) return;
+    this.detached = true;
+    log('PipeClient detached', { reason });
+    this.markDisconnected();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
   private scheduleReconnect(): void {
+    if (this.detached) {
+      // Host is gone — do not attempt to reconnect.
+      return;
+    }
     if (this.reconnectTimer) {
       return;
     }
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (!this.connected) {
+      if (!this.connected && !this.detached) {
         log('PipeClient attempting reconnect', { pipePath: this.pipePath });
         void this.connect().catch(() => {
           // Error already logged; will retry
@@ -151,8 +230,12 @@ export class PipeClient {
     }
   }
 
-  /** Send an event to AI_maid via the pipe. */
+  /** Send an event to AI_maid via the pipe. Silently skipped if detached. */
   sendEvent(payload: RendererEventPayload, requestId: string | null): void {
+    if (this.detached) {
+      // Host is gone — silently drop. Do NOT attempt to write or log to pipe.
+      return;
+    }
     const envelope = makeEnvelope(payload, requestId);
     const line = JSON.stringify(envelope) + '\n';
     this.write(line);
@@ -168,7 +251,16 @@ export class PipeClient {
     try {
       this.netClient.write(data, 'utf8');
     } catch (e) {
-      log('PipeClient write failed', e);
+      if (isPipeDisconnectError(e)) {
+        // EPIPE / ECONNRESET / ERR_STREAM_DESTROYED — peer is gone.
+        // Mark disconnected so we stop trying. Do NOT log as error.
+        log('PipeClient write EPIPE ignored', {
+          code: (e as { code?: string }).code
+        });
+        this.markDisconnected();
+      } else {
+        log('PipeClient write failed', e);
+      }
     }
   }
 
@@ -176,15 +268,19 @@ export class PipeClient {
     return this.connected;
   }
 
+  isDetached(): boolean {
+    return this.detached;
+  }
+
   close(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.connected = false;
+    this.detach('close');
     if (this.netClient) {
       try {
         this.netClient.end();
+      } catch {
+        // ignore
+      }
+      try {
         this.netClient.destroy();
       } catch {
         // ignore

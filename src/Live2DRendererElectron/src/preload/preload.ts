@@ -18,6 +18,7 @@ export type RendererApi = {
   resolveModelUrl: (modelPath: string) => Promise<string>;
   getCubismCoreUrl: () => Promise<string>;
   getStartupArgs: () => Promise<StartupInfo>;
+  getActionTagMapUrl: () => Promise<string | null>;
 };
 
 const api: RendererApi = {
@@ -52,6 +53,9 @@ const api: RendererApi = {
   },
   getStartupArgs() {
     return ipcRenderer.invoke('get-startup-args');
+  },
+  getActionTagMapUrl() {
+    return ipcRenderer.invoke('get-action-tag-map-url');
   }
 };
 

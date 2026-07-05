@@ -1,9 +1,13 @@
 import './styles/app.css';
 import type { RendererCommand } from '../main/protocolTypes';
 import { Live2DPlayer } from './live2d/Live2DPlayer';
-import { playMotion, setExpression, applyActionTag, startSpeaking, stopSpeaking } from './live2d/motionController';
+import { playMotion, setExpression, applyActionTag, startSpeaking, startSpeakingWithAudio, stopSpeaking, loadActionTagMap } from './live2d/motionController';
 
 console.info('Renderer script starting');
+
+// Load action_tag_map.json (best-effort; failures fall back to defaults).
+// The config URL is resolved by main and exposed via getActionTagMapUrl.
+void loadActionTagMapConfig();
 
 window.addEventListener('error', (event) => {
   const error = event.error instanceof Error ? event.error : undefined;
@@ -296,7 +300,17 @@ async function handleCommand(command: RendererCommand): Promise<void> {
         applyActionTag(player.currentModel, command.actionTag);
         break;
       case 'SpeakStart':
-        startSpeaking(player.currentModel);
+        console.info('[SpeakStart] received', {
+          hasText: !!command.text,
+          hasAudioPath: !!command.audioPath,
+          audioPath: command.audioPath,
+          estimatedDurationMs: command.estimatedDurationMs
+        });
+        if (command.audioPath) {
+          await startSpeakingWithAudio(player.currentModel, command.audioPath);
+        } else {
+          startSpeaking(player.currentModel);
+        }
         break;
       case 'SpeakStop':
         stopSpeaking();
@@ -335,6 +349,7 @@ function emitPointerEvent(event: PointerEvent, kind: string): void {
   const normalizedY = window.innerHeight > 0 ? event.clientY / window.innerHeight : 0;
   const hitAreas = player.hitTest(event.clientX, event.clientY);
   const hitAreaName = hitAreas.length > 0 ? hitAreas[0] : undefined;
+  const bodyPart = resolveBodyPart(hitAreaName, normalizedY);
 
   void window.live2dRenderer.emitEvent({
     type: 'PointerEvent',
@@ -344,8 +359,47 @@ function emitPointerEvent(event: PointerEvent, kind: string): void {
     normalizedX: Number(normalizedX.toFixed(4)),
     normalizedY: Number(normalizedY.toFixed(4)),
     hitAreaName,
+    bodyPart,
     button: event.button === 0 ? 'left' : event.button === 2 ? 'right' : 'other'
   });
+}
+
+/**
+ * Resolve a click to a body part category.
+ *
+ * Priority:
+ *  1. hitAreaName (if the model defines HitAreas) — matched against a
+ *     keyword table. Unknown hit area names fall through to step 2.
+ *  2. normalizedY fallback (model has no HitAreas, or area unrecognized):
+ *       y < 0.28        → head
+ *       0.28 <= y < 0.45 → face
+ *       0.45 <= y < 0.75 → body
+ *       y >= 0.75       → leg
+ *  3. Default: 'body'
+ */
+function resolveBodyPart(
+  hitAreaName: string | undefined,
+  normalizedY: number
+): 'head' | 'face' | 'hair' | 'body' | 'hand' | 'leg' | 'other' {
+  if (hitAreaName) {
+    const name = hitAreaName.toLowerCase();
+    // Keyword-based mapping (covers common Live2D hit area naming conventions)
+    if (/(head|hair|horn|ear|hat|cap)/i.test(name)) {
+      if (/hair/.test(name)) return 'hair';
+      return 'head';
+    }
+    if (/(face|eye|nose|mouth|cheek|forehead)/i.test(name)) return 'face';
+    if (/(hand|arm|finger|wrist)/i.test(name)) return 'hand';
+    if (/(leg|foot|knee|shoe|boot)/i.test(name)) return 'leg';
+    if (/(body|chest|breast|belly|waist|hip|torso|clothes|outfit)/i.test(name)) return 'body';
+    // Unknown hit area name — fall through to normalizedY
+  }
+
+  // normalizedY fallback
+  if (normalizedY < 0.28) return 'head';
+  if (normalizedY < 0.45) return 'face';
+  if (normalizedY < 0.75) return 'body';
+  return 'leg';
 }
 
 function emitTransformChanged(reason: string): void {
@@ -486,4 +540,20 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
       }
     );
   });
+}
+
+// ============================================================
+// Action tag map config loading
+//
+// Fetches config/action_tag_map.json (resolved by main process) and merges
+// it with the built-in defaults. Failures are non-fatal — defaults apply.
+// ============================================================
+
+async function loadActionTagMapConfig(): Promise<void> {
+  try {
+    const url = await window.live2dRenderer.getActionTagMapUrl();
+    await loadActionTagMap(url);
+  } catch (e) {
+    console.warn('[Renderer] loadActionTagMapConfig failed', e);
+  }
 }
