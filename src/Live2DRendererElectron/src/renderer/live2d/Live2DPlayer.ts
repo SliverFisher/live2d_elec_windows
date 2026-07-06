@@ -29,6 +29,7 @@ const MAX_USER_SCALE = 4;
 const MODEL_HIT_PADDING = 4;
 const HIT_ALPHA_THRESHOLD = 12;
 const INITIAL_WINDOW_PADDING = 24;
+const BUBBLE_RESERVE_TOP = 200;       // 窗口顶部为气泡预留的额外高度
 
 export class Live2DPlayer {
   private app: Application;
@@ -173,7 +174,7 @@ export class Live2DPlayer {
       };
     }
     const scaledWidth = this.baseModelWidth * this.baseFitScale * this.userScale + INITIAL_WINDOW_PADDING * 2;
-    const scaledHeight = this.baseModelHeight * this.baseFitScale * this.userScale + INITIAL_WINDOW_PADDING * 2;
+    const scaledHeight = this.baseModelHeight * this.baseFitScale * this.userScale + INITIAL_WINDOW_PADDING * 2 + BUBBLE_RESERVE_TOP;
     return {
       width: Math.max(160, Math.round(scaledWidth)),
       height: Math.max(160, Math.round(scaledHeight))
@@ -506,7 +507,7 @@ export class Live2DPlayer {
     const nextScale = this.baseFitScale * this.userScale;
     this.live2dModel.scale.set(nextScale);
     this.live2dModel.x = screenWidth / 2;
-    this.live2dModel.y = screenHeight / 2;
+    this.live2dModel.y = screenHeight / 2 + BUBBLE_RESERVE_TOP / 2;
 
     this.logModelPlacement(nextScale);
   }

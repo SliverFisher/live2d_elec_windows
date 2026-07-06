@@ -7,7 +7,10 @@
   </head>
   <body>
     <main id="app">
-      <canvas id="live2d-canvas"></canvas>
+      <div id="live2dRoot" class="live2d-root">
+        <canvas id="live2d-canvas"></canvas>
+        <div id="bubbleLayer" class="bubble-layer"></div>
+      </div>
       <div id="status" aria-live="polite"></div>
     </main>
     <script type="module" src="./renderer.ts"></script>

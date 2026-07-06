@@ -2,6 +2,7 @@ import './styles/app.css';
 import type { RendererCommand } from '../main/protocolTypes';
 import { Live2DPlayer } from './live2d/Live2DPlayer';
 import { playMotion, setExpression, applyActionTag, startSpeaking, startSpeakingWithAudio, stopSpeaking, loadActionTagMap } from './live2d/motionController';
+import { BubbleManager } from './live2d/BubbleManager';
 
 console.info('Renderer script starting');
 
@@ -39,6 +40,7 @@ const canvas = canvasElement;
 const status = statusElement;
 
 let player: Live2DPlayer;
+let bubbleManager: BubbleManager;
 const DRAG_START_DISTANCE = 6;
 let dragPointerId: number | null = null;
 let dragStartPoint: { clientX: number; clientY: number } | null = null;
@@ -59,6 +61,43 @@ try {
   throw error;
 }
 
+// Initialize bubble overlay — DOM-based speech bubble for AI_maid text.
+// 注入 getModelBounds 回调: 用 Live2DPlayer.getModelGeometry() 返回的
+// modelBounds (Pixi stage coords == window CSS 像素, autoDensity) + scale.
+// BubbleManager 用 bounds 按 headTopRatio/headCenterXRatio 计算头部锚点.
+// 模型未加载时返回 null, BubbleManager 用窗口比例兜底.
+bubbleManager = new BubbleManager({
+  onShown: (requestId) => {
+    void window.live2dRenderer.emitEvent({
+      type: 'BubbleShown',
+      requestId,
+      ok: true
+    });
+  },
+  onError: (requestId, error) => {
+    void window.live2dRenderer.emitEvent({
+      type: 'BubbleError',
+      requestId,
+      ok: false,
+      error
+    });
+  },
+  onHidden: (requestId, reason) => {
+    void window.live2dRenderer.emitEvent({
+      type: 'BubbleHidden',
+      requestId,
+      reason
+    });
+  }
+}, () => {
+  const geometry = player.getModelGeometry();
+  if (!geometry) return null;
+  return {
+    bounds: geometry.modelBounds,
+    scale: geometry.scale
+  };
+});
+
 // Dev mode: auto-load model based on startup args (--model or default).
 // AI_madi mode: wait for LoadModel command.
 void initDevModel();
@@ -67,7 +106,10 @@ window.addEventListener('resize', () => {
   if (isResizingWindow) {
     return;
   }
-  window.requestAnimationFrame(() => player.handleWindowResize());
+  window.requestAnimationFrame(() => {
+    player.handleWindowResize();
+    bubbleManager.onResize();
+  });
 });
 
 window.addEventListener('blur', () => {
@@ -364,6 +406,33 @@ async function handleCommand(command: RendererCommand): Promise<void> {
         });
         break;
       }
+      case 'ShowBubble': {
+        console.info('[ShowBubble] received', {
+          requestId: command.requestId,
+          source: command.source,
+          voiceStyle: command.voiceStyle,
+          textLength: command.text.length,
+          interrupt: command.interrupt,
+          priority: command.priority
+        });
+        bubbleManager.show(
+          command.requestId,
+          command.text,
+          command.voiceStyle,
+          command.durationMs,
+          command.priority,
+          command.interrupt
+        );
+        break;
+      }
+      case 'HideBubble': {
+        console.info('[HideBubble] received', {
+          requestId: command.requestId,
+          reason: command.reason
+        });
+        bubbleManager.hide(command.reason ?? 'user_closed');
+        break;
+      }
       default:
         break;
     }
@@ -457,6 +526,9 @@ function emitTransformChanged(reason: string): void {
     scale: player.currentScale,
     reason
   });
+  // 模型移动/缩放后重新定位气泡 (拖动结束/缩放结束/模型加载/SetTransform)
+  // rAF 避免在 transform 还没完全应用时测量
+  window.requestAnimationFrame(() => bubbleManager.relayoutIfVisible());
 }
 
 // ============================================================

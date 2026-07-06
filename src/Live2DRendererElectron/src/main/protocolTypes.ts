@@ -54,7 +54,19 @@ export type AiMaidCommand =
       roleId?: string;
       includeParts?: boolean;
       includeAnchors?: boolean;
-    };
+    }
+  | {
+      type: 'ShowBubble';
+      requestId: string;
+      text: string;
+      voiceStyle?: 'normal' | 'soft' | 'lively' | 'close';
+      source?: string;
+      durationMs?: number;
+      priority?: number;
+      interrupt?: boolean;
+      timestamp?: number;
+    }
+  | { type: 'HideBubble'; requestId: string; reason?: string };
 
 // ============================================================
 // Events: Live → AI_maid
@@ -123,7 +135,10 @@ export type RendererEventPayload =
       scale?: number;
       code?: string;
       message?: string;
-    };
+    }
+  | { type: 'BubbleShown'; requestId: string; ok: true }
+  | { type: 'BubbleError'; requestId: string; ok: false; error: string }
+  | { type: 'BubbleHidden'; requestId: string; reason: string };
 
 // ============================================================
 // Internal IPC types (main ↔ renderer)
@@ -148,7 +163,18 @@ export type RendererCommand =
       roleId?: string;
       includeParts?: boolean;
       includeAnchors?: boolean;
-    };
+    }
+  | {
+      type: 'ShowBubble';
+      requestId: string;
+      text: string;
+      voiceStyle?: 'normal' | 'soft' | 'lively' | 'close';
+      source?: string;
+      durationMs?: number;
+      priority?: number;
+      interrupt?: boolean;
+    }
+  | { type: 'HideBubble'; requestId: string; reason?: string };
 
 /**
  * Event sent from renderer to main via IPC.
@@ -198,7 +224,10 @@ export type RendererEvent =
       scale?: number;
       code?: string;
       message?: string;
-    };
+    }
+  | { type: 'BubbleShown'; requestId: string; ok: true }
+  | { type: 'BubbleError'; requestId: string; ok: false; error: string }
+  | { type: 'BubbleHidden'; requestId: string; reason: string };
 
 // ============================================================
 // Helper: build envelope (strips `type` from payload)

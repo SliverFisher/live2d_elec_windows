@@ -17,6 +17,14 @@ body {
   position: relative;
 }
 
+/* live2dRoot: canvas + bubbleLayer 的共同定位容器 */
+.live2d-root {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
 #live2d-canvas {
   position: absolute;
   inset: 0;
@@ -48,4 +56,142 @@ body {
 
 #status.is-visible {
   display: block;
+}
+
+/* ============================================================
+   Live2D bubble overlay (DOM 圆角矩形 + 三角尾巴 v6)
+   - HTML/CSS 圆角矩形 + ::before/::after 三角尾巴 (clip-path polygon)
+   - 位置基于 Live2D model.getBounds() 计算
+   - 气泡宽度固定, 文本只影响高度, 长文本向上增长
+   - bubbleLayer pointer-events:none, 气泡本体 pointer-events:auto
+   ============================================================ */
+
+.bubble-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  overflow: visible;
+  /* 不吃鼠标事件, 让 Live2D 拖动正常工作 */
+  pointer-events: none;
+}
+
+.live2d-bubble {
+  position: absolute;
+  box-sizing: border-box;
+  width: var(--bubble-width, 420px);
+  min-height: 72px;
+  /* 无 max-height, 允许长文本自动变高 */
+  padding: 16px 22px 17px 24px;
+
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  font-size: var(--bubble-font-size, 16px);
+  line-height: 1.58;
+  letter-spacing: 0;
+  color: #4b2735;
+
+  background: rgba(255, 250, 253, 0.97);
+  border: 2px solid rgba(238, 138, 180, 0.82);
+  border-radius: 18px;
+
+  box-shadow:
+    0 10px 24px rgba(116, 54, 85, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.92);
+
+  user-select: none;
+  pointer-events: auto;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* 左下角尾巴外边框 (深色三角) */
+.live2d-bubble::before {
+  content: "";
+  position: absolute;
+  left: var(--tail-left, 86px);
+  bottom: -18px;
+  width: 34px;
+  height: 22px;
+  background: var(--tail-border-color, rgba(238, 138, 180, 0.82));
+  clip-path: polygon(0 0, 100% 0, 46% 100%);
+}
+
+/* 左下角尾巴内填充 (与气泡背景同色, 盖住上半部分形成描边效果) */
+.live2d-bubble::after {
+  content: "";
+  position: absolute;
+  left: calc(var(--tail-left, 86px) + 3px);
+  bottom: -14px;
+  width: 28px;
+  height: 18px;
+  background: var(--tail-fill-color, rgba(255, 250, 253, 0.97));
+  clip-path: polygon(0 0, 100% 0, 46% 100%);
+}
+
+.live2d-bubble__text {
+  position: relative;
+  z-index: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* voiceStyle 主题 (实际颜色由 JS 通过 style 设置, 这里保留默认值作兜底) */
+.live2d-bubble--normal {
+  background: rgba(255, 250, 253, 0.97);
+  border-color: rgba(238, 138, 180, 0.82);
+  color: #4b2735;
+}
+
+.live2d-bubble--soft {
+  background: rgba(255, 251, 248, 0.97);
+  border-color: rgba(232, 157, 192, 0.84);
+  color: #4a2b38;
+}
+
+.live2d-bubble--lively {
+  background: rgba(255, 247, 238, 0.97);
+  border-color: rgba(255, 145, 188, 0.86);
+  color: #532537;
+}
+
+.live2d-bubble--close {
+  background: rgba(255, 244, 250, 0.98);
+  border-color: rgba(255, 118, 172, 0.9);
+  color: #4f2034;
+}
+
+/* 隐藏状态 */
+.live2d-bubble.is-hidden {
+  display: none;
+}
+
+/* 进入/离开动画 */
+.live2d-bubble.is-entering {
+  animation: bubbleIn 160ms ease-out both;
+}
+
+.live2d-bubble.is-leaving {
+  animation: bubbleOut 120ms ease-in both;
+}
+
+@keyframes bubbleIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes bubbleOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(5px) scale(0.985);
+  }
 }

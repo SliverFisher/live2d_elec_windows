@@ -21,6 +21,14 @@ let queuedLoadModel: { command: LoadModelRendererCommand; requestId: string | nu
 // sending the next query.
 let pendingQueryGeometryRequestId: string | null = null;
 
+// Maps in-flight bubble requestIds to the requestId AI_maid used when
+// sending ShowBubble/HideBubble. The renderer's BubbleShown/BubbleError/
+// BubbleHidden events carry the requestId back, and we forward the event
+// to AI_maid with the same requestId so WPF can correlate request ↔ event.
+// We keep a Set (not a single slot) because multiple bubbles can be in
+// flight (queued) and the renderer reports each one independently.
+const activeBubbleRequestIds = new Set<string>();
+
 // Renderer readiness tracking — prevents LoadModel from being lost when it
 // arrives before the renderer process has finished loading.
 type LoadModelRendererCommand = Extract<RendererCommand, { type: 'LoadModel' }>;
@@ -546,6 +554,15 @@ function handleRendererEvent(event: RendererEvent): void {
     case 'ModelGeometryResult':
       handleModelGeometryResult(event);
       break;
+    case 'BubbleShown':
+      handleBubbleShown(event);
+      break;
+    case 'BubbleError':
+      handleBubbleError(event);
+      break;
+    case 'BubbleHidden':
+      handleBubbleHidden(event);
+      break;
     default:
       log('Unknown renderer event type', (event as { type: string }).type);
       break;
@@ -641,6 +658,164 @@ function handleModelGeometryResult(
 }
 
 // ============================================================
+// Bubble event handlers (renderer → main → AI_maid)
+//
+// The renderer reports BubbleShown/BubbleError/BubbleHidden with the
+// requestId that was originally passed in via ShowBubble/HideBubble.
+// We forward the event to AI_maid with that same requestId so WPF can
+// correlate the request with the result.
+//
+// BubbleShown: bubble is now visible. We keep the requestId in the active
+//   set so a subsequent BubbleHidden can be matched.
+// BubbleError: bubble could not be shown (e.g. empty text).
+// BubbleHidden: bubble was hidden (timeout / user click / interrupt /
+//   HideBubble command).
+// ============================================================
+
+function handleBubbleShown(event: Extract<RendererEvent, { type: 'BubbleShown' }>): void {
+  activeBubbleRequestIds.add(event.requestId);
+  log('[Bubble] BubbleShown', { requestId: event.requestId });
+  sendEvent(
+    {
+      type: 'BubbleShown',
+      requestId: event.requestId,
+      ok: true
+    },
+    event.requestId
+  );
+}
+
+function handleBubbleError(event: Extract<RendererEvent, { type: 'BubbleError' }>): void {
+  activeBubbleRequestIds.delete(event.requestId);
+  log('[Bubble] BubbleError', { requestId: event.requestId, error: event.error });
+  sendEvent(
+    {
+      type: 'BubbleError',
+      requestId: event.requestId,
+      ok: false,
+      error: event.error
+    },
+    event.requestId
+  );
+}
+
+function handleBubbleHidden(event: Extract<RendererEvent, { type: 'BubbleHidden' }>): void {
+  activeBubbleRequestIds.delete(event.requestId);
+  log('[Bubble] BubbleHidden', { requestId: event.requestId, reason: event.reason });
+  sendEvent(
+    {
+      type: 'BubbleHidden',
+      requestId: event.requestId,
+      reason: event.reason
+    },
+    event.requestId
+  );
+}
+
+/**
+ * Forward a ShowBubble command from AI_maid to the renderer.
+ *
+ * The requestId from AI_maid is used directly as the renderer's requestId
+ * so the BubbleShown/BubbleError/BubbleHidden events can be correlated
+ * back to the original ShowBubble by both main and WPF.
+ */
+function handleShowBubble(
+  command: Extract<AiMaidCommand, { type: 'ShowBubble' }>,
+  requestId: string | null
+): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    log('[Bubble] ShowBubble: window unavailable', { requestId: command.requestId });
+    sendEvent(
+      {
+        type: 'BubbleError',
+        requestId: command.requestId,
+        ok: false,
+        error: 'renderer_window_unavailable'
+      },
+      requestId
+    );
+    return;
+  }
+
+  if (!rendererReady) {
+    log('[Bubble] ShowBubble: renderer not ready', { requestId: command.requestId });
+    sendEvent(
+      {
+        type: 'BubbleError',
+        requestId: command.requestId,
+        ok: false,
+        error: 'renderer_not_ready'
+      },
+      requestId
+    );
+    return;
+  }
+
+  // Track this bubble as in-flight so BubbleHidden can be matched.
+  activeBubbleRequestIds.add(command.requestId);
+
+  const rendererCommand: RendererCommand = {
+    type: 'ShowBubble',
+    requestId: command.requestId,
+    text: command.text,
+    voiceStyle: command.voiceStyle,
+    source: command.source,
+    durationMs: command.durationMs,
+    priority: command.priority,
+    interrupt: command.interrupt
+  };
+
+  log('[Bubble] ShowBubble forwarded to renderer', {
+    requestId: command.requestId,
+    source: command.source,
+    voiceStyle: command.voiceStyle,
+    textLength: command.text.length,
+    interrupt: command.interrupt,
+    priority: command.priority,
+    durationMs: command.durationMs
+  });
+
+  sendCommandToRenderer(rendererCommand);
+}
+
+/**
+ * Forward a HideBubble command from AI_maid to the renderer.
+ * The renderer will hide the current bubble and emit a BubbleHidden
+ * event with reason 'user_closed' (or the provided reason).
+ */
+function handleHideBubble(
+  command: Extract<AiMaidCommand, { type: 'HideBubble' }>,
+  requestId: string | null
+): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !rendererReady) {
+    log('[Bubble] HideBubble: renderer unavailable', { requestId: command.requestId });
+    // Nothing to hide — acknowledge with a BubbleHidden so WPF doesn't hang.
+    sendEvent(
+      {
+        type: 'BubbleHidden',
+        requestId: command.requestId,
+        reason: command.reason ?? 'renderer_unavailable'
+      },
+      requestId
+    );
+    return;
+  }
+
+  const rendererCommand: RendererCommand = {
+    type: 'HideBubble',
+    requestId: command.requestId,
+    reason: command.reason
+  };
+
+  log('[Bubble] HideBubble forwarded to renderer', {
+    requestId: command.requestId,
+    reason: command.reason
+  });
+
+  sendCommandToRenderer(rendererCommand);
+}
+
+// ============================================================
 // AI_maid command handling (AI_maid → main → renderer)
 // ============================================================
 
@@ -704,6 +879,12 @@ export function handleAiMaidCommand(command: AiMaidCommand, requestId: string | 
       break;
     case 'QueryModelGeometry':
       handleQueryModelGeometry(command, requestId);
+      break;
+    case 'ShowBubble':
+      handleShowBubble(command, requestId);
+      break;
+    case 'HideBubble':
+      handleHideBubble(command, requestId);
       break;
     case 'PlayMotion':
     case 'SetExpression':
