@@ -8,6 +8,9 @@ dist/
 # Electron build output
 release/
 
+# Project resources
+assests/
+
 # .NET build output
 bin/
 obj/
