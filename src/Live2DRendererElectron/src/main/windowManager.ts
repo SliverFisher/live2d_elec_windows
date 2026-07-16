@@ -100,18 +100,14 @@ export function createRendererWindow(): BrowserWindow {
   }
 
   mainWindow.once('ready-to-show', () => {
-    // Page has rendered its first frame — safe to show now without flashing white.
+    // 首次可见性完全由 AI_maid 的 Show 命令控制。保持隐藏，直到宿主先发送
+    // SetTransform；否则窗口会在默认中心位置暴露一帧，再跳到桌宠位置。
     log('BrowserWindow ready-to-show', {
       id: mainWindow?.id,
       visible: mainWindow?.isVisible(),
       bounds: mainWindow?.getBounds()
     });
-    mainWindow?.center();
-    mainWindow?.showInactive();
-    log('BrowserWindow shown (showInactive)', {
-      id: mainWindow?.id,
-      visible: mainWindow?.isVisible()
-    });
+    log('BrowserWindow remains hidden until explicit Show command');
   });
 
   mainWindow.on('will-resize', (event, newBounds) => {
