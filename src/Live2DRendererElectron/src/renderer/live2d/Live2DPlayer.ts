@@ -30,7 +30,6 @@ const MODEL_HIT_PADDING = 4;
 const HIT_ALPHA_THRESHOLD = 12;
 const INITIAL_WINDOW_PADDING = 24;
 const BUBBLE_RESERVE_TOP = 200;       // 窗口顶部为气泡预留的额外高度
-const LIVE2D_RENDER_FPS = 30;
 
 export class Live2DPlayer {
   private app: Application;
@@ -159,8 +158,8 @@ export class Live2DPlayer {
 
   clientToPixiPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
-    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
+    const screenWidth = this.canvasWidth || window.innerWidth || this.canvas.clientWidth;
+    const screenHeight = this.canvasHeight || window.innerHeight || this.canvas.clientHeight;
     return {
       x: (clientX - rect.left) * (screenWidth / rect.width),
       y: (clientY - rect.top) * (screenHeight / rect.height)
@@ -170,8 +169,8 @@ export class Live2DPlayer {
   getFittedWindowSize(): { width: number; height: number } {
     if (this.baseModelWidth <= 0 || this.baseModelHeight <= 0) {
       return {
-        width: this.canvas.clientWidth || 720,
-        height: this.canvas.clientHeight || 900
+        width: window.innerWidth,
+        height: window.innerHeight
       };
     }
     const scaledWidth = this.baseModelWidth * this.baseFitScale * this.userScale + INITIAL_WINDOW_PADDING * 2;
@@ -270,13 +269,13 @@ export class Live2DPlayer {
     return this.userScale;
   }
 
-  resizeViewport(width: number, height: number): void {
-    if (!this.pixiInitialized || !this.app.renderer) {
+  handleWindowResize(): void {
+    if (!this.model || !this.app.renderer) {
       return;
     }
 
-    const newWidth = Math.max(1, Math.round(width));
-    const newHeight = Math.max(1, Math.round(height));
+    const newWidth = window.innerWidth;
+    const newHeight = window.innerHeight;
 
     if (Math.abs(newWidth - this.canvasWidth) < 1 && Math.abs(newHeight - this.canvasHeight) < 1) {
       return;
@@ -285,7 +284,7 @@ export class Live2DPlayer {
     this.canvasWidth = newWidth;
     this.canvasHeight = newHeight;
     this.app.renderer.resize(newWidth, newHeight);
-    this.applyTransform('resizeViewport');
+    this.applyTransform('handleWindowResize');
   }
 
   containsPoint(clientX: number, clientY: number): boolean {
@@ -429,9 +428,6 @@ export class Live2DPlayer {
       return;
     }
 
-    // Cubism 模型更新和 Pixi 提交共用同一个节拍，避免两套 ticker 各自以
-    // 显示器刷新率持续运行。30fps 与 Cubism 常用动作素材的时间基准一致。
-    Ticker.shared.maxFPS = LIVE2D_RENDER_FPS;
     Live2DModel!.registerTicker(Ticker);
 
     this.app = new Application({
@@ -439,12 +435,11 @@ export class Live2DPlayer {
       backgroundAlpha: 0,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
-      preserveDrawingBuffer: true,
-      sharedTicker: true
+      preserveDrawingBuffer: true
     });
 
-    this.canvasWidth = this.canvas.clientWidth || 720;
-    this.canvasHeight = this.canvas.clientHeight || 900;
+    this.canvasWidth = window.innerWidth;
+    this.canvasHeight = window.innerHeight;
     this.app.renderer.resize(this.canvasWidth, this.canvasHeight);
 
     const gl = this.canvas.getContext('webgl') ?? this.canvas.getContext('webgl2');
@@ -455,6 +450,9 @@ export class Live2DPlayer {
     this.gl = gl;
     this.pixiInitialized = true;
 
+    window.addEventListener('resize', () => {
+      this.handleWindowResize();
+    });
   }
 
   private calcBaseFit(originalWidth: number, originalHeight: number): void {
@@ -462,8 +460,8 @@ export class Live2DPlayer {
       return;
     }
 
-    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
-    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
+    const screenWidth = this.canvasWidth || window.innerWidth;
+    const screenHeight = this.canvasHeight || window.innerHeight;
     if (screenWidth <= 0 || screenHeight <= 0) {
       return;
     }
@@ -500,8 +498,8 @@ export class Live2DPlayer {
       return;
     }
 
-    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
-    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
+    const screenWidth = this.canvasWidth || window.innerWidth;
+    const screenHeight = this.canvasHeight || window.innerHeight;
     if (screenWidth <= 0 || screenHeight <= 0) {
       return;
     }

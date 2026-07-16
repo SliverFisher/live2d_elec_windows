@@ -36,24 +36,22 @@ let rendererReady = false;
 let pendingLoadModelCommand: { command: LoadModelRendererCommand; requestId: string | null } | null = null;
 let loadModelTimeoutTimer: NodeJS.Timeout | null = null;
 const LOAD_MODEL_TIMEOUT_MS = 10000;
-let lastPetPanelBounds = { x: 0, y: 0, width: 720, height: 900 };
 
 // Renderer crash auto-recovery — reload up to N times before giving up.
 // A successful reload resets the counter (tracked via did-finish-load).
 const MAX_RENDER_CRASH_RECOVERIES = 3;
 let renderCrashRecoveryAttempts = 0;
 
-function getVirtualDesktopBounds(): { x: number; y: number; width: number; height: number } {
-  const displays = screen.getAllDisplays();
-  const left = Math.min(...displays.map((display) => display.bounds.x));
-  const top = Math.min(...displays.map((display) => display.bounds.y));
-  const right = Math.max(...displays.map((display) => display.bounds.x + display.bounds.width));
-  const bottom = Math.max(...displays.map((display) => display.bounds.y + display.bounds.height));
-  return { x: left, y: top, width: right - left, height: bottom - top };
-}
+let petDragState: {
+  startCursorX: number;
+  startCursorY: number;
+  startX: number;
+  startY: number;
+  width: number;
+  height: number;
+} | null = null;
 
 export function createRendererWindow(): BrowserWindow {
-  const desktopBounds = getVirtualDesktopBounds();
   log('BrowserWindow create start', {
     transparent: true,
     frame: false,
@@ -63,7 +61,10 @@ export function createRendererWindow(): BrowserWindow {
   });
 
   mainWindow = new BrowserWindow({
-    ...desktopBounds,
+    width: 720,
+    height: 900,
+    minWidth: 160,
+    minHeight: 160,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -107,6 +108,13 @@ export function createRendererWindow(): BrowserWindow {
       bounds: mainWindow?.getBounds()
     });
     log('BrowserWindow remains hidden until explicit Show command');
+  });
+
+  mainWindow.on('will-resize', (event, newBounds) => {
+    if (petDragState) {
+      newBounds.width = petDragState.width;
+      newBounds.height = petDragState.height;
+    }
   });
 
   mainWindow.on('show', () => {
@@ -262,6 +270,67 @@ export function registerWindowIpc(): void {
     handleRendererEvent(payload);
   });
 
+  ipcMain.handle('pet:drag-start', () => {
+    if (!mainWindow) {
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const bounds = mainWindow.getBounds();
+    petDragState = {
+      startCursorX: cursor.x,
+      startCursorY: cursor.y,
+      startX: bounds.x,
+      startY: bounds.y,
+      width: bounds.width,
+      height: bounds.height
+    };
+  });
+
+  ipcMain.handle('pet:drag-move', () => {
+    if (!mainWindow || !petDragState) {
+      return;
+    }
+    const cursor = screen.getCursorScreenPoint();
+    const dx = cursor.x - petDragState.startCursorX;
+    const dy = cursor.y - petDragState.startCursorY;
+    const nextX = Math.round(petDragState.startX + dx);
+    const nextY = Math.round(petDragState.startY + dy);
+    mainWindow.setBounds({
+      x: nextX,
+      y: nextY,
+      width: petDragState.width,
+      height: petDragState.height
+    }, false);
+  });
+
+  ipcMain.handle('pet:drag-end', () => {
+    if (!mainWindow) {
+      petDragState = null;
+      return;
+    }
+    const bounds = mainWindow.getBounds();
+    petDragState = null;
+    // TransformChanged (drag end) is emitted by the renderer after this returns
+    log('Drag ended', { x: bounds.x, y: bounds.y });
+  });
+
+  ipcMain.handle('pet:resize-to-fit', (_event, payload: { width: number; height: number }) => {
+    if (!mainWindow) {
+      return;
+    }
+    const oldBounds = mainWindow.getBounds();
+    const centerX = oldBounds.x + oldBounds.width / 2;
+    const centerY = oldBounds.y + oldBounds.height / 2;
+    const targetWidth = Math.max(160, Math.round(payload.width));
+    const targetHeight = Math.max(160, Math.round(payload.height));
+    mainWindow.setBounds({
+      x: Math.round(centerX - targetWidth / 2),
+      y: Math.round(centerY - targetHeight / 2),
+      width: targetWidth,
+      height: targetHeight
+    }, false);
+  });
+
   ipcMain.handle('set-ignore-mouse-events', (_event, payload: { ignore: boolean; options?: { forward?: boolean } }) => {
     if (!mainWindow || mainWindow.isDestroyed()) {
       return;
@@ -397,27 +466,28 @@ function handleRendererEvent(event: RendererEvent): void {
       processQueuedLoadModel();
       break;
     case 'TransformChanged': {
-      const hostBounds = mainWindow?.getBounds();
-      const bounds = {
-        x: (hostBounds?.x ?? 0) + event.x,
-        y: (hostBounds?.y ?? 0) + event.y,
-        width: event.width,
-        height: event.height
-      };
-      lastPetPanelBounds = bounds;
+      // Renderer only knows scale + reason; fill in xDip/yDip/widthDip/heightDip
+      // from the actual window bounds so AI_maid gets the full picture.
+      // getBounds() returns DIP (Device Independent Pixels), not physical pixels.
+      // dpiScale is the display's monitor scaling factor (e.g. 1.25 on a
+      // 125% Windows DPI setting). xDip/yDip/widthDip/heightDip are DIPs;
+      // dpiScale lets consumers convert to physical pixels if needed.
+      const bounds = mainWindow?.getBounds();
       let dpiScale = 1;
-      try {
-        dpiScale = screen.getDisplayMatching(bounds).scaleFactor || 1;
-      } catch (e) {
-        log('Failed to get dpiScale for TransformChanged', { error: e });
+      if (bounds) {
+        try {
+          dpiScale = screen.getDisplayMatching(bounds).scaleFactor || 1;
+        } catch (e) {
+          log('Failed to get dpiScale for TransformChanged', { error: e });
+        }
       }
       sendEvent(
         {
           type: 'TransformChanged',
-          xDip: bounds.x,
-          yDip: bounds.y,
-          widthDip: bounds.width,
-          heightDip: bounds.height,
+          xDip: bounds?.x ?? 0,
+          yDip: bounds?.y ?? 0,
+          widthDip: bounds?.width ?? 0,
+          heightDip: bounds?.height ?? 0,
           scale: event.scale,
           dpiScale,
           reason: event.reason
@@ -431,7 +501,7 @@ function handleRendererEvent(event: RendererEvent): void {
       // event.screenXDip/screenYDip (from the DOM event.screenX/Y) are DIP. Use
       // Electron's screen.dipToScreenPoint to convert to physical pixels — do NOT
       // multiply by scaleFactor manually, multi-monitor setups have per-display origins.
-      const windowBoundsDip = lastPetPanelBounds;
+      const windowBoundsDip = mainWindow?.getBounds();
       let screenXPx = event.screenXDip;
       let screenYPx = event.screenYDip;
       let displayId = 0;
@@ -445,14 +515,16 @@ function handleRendererEvent(event: RendererEvent): void {
       } catch (e) {
         log('Failed to convert DIP to screen px for RightClick', { error: e });
       }
-      try {
-        const display = screen.getDisplayMatching(windowBoundsDip);
-        displayId = display.id;
-        displayScaleFactor = display.scaleFactor || 1;
-        displayBoundsDip = display.bounds;
-        displayWorkAreaDip = display.workArea;
-      } catch (e) {
-        log('Failed to get display info for RightClick', { error: e });
+      if (windowBoundsDip) {
+        try {
+          const display = screen.getDisplayMatching(windowBoundsDip);
+          displayId = display.id;
+          displayScaleFactor = display.scaleFactor || 1;
+          displayBoundsDip = display.bounds;
+          displayWorkAreaDip = display.workArea;
+        } catch (e) {
+          log('Failed to get display info for RightClick', { error: e });
+        }
       }
       sendEvent(
         {
@@ -465,7 +537,7 @@ function handleRendererEvent(event: RendererEvent): void {
           displayScaleFactor,
           displayBoundsDip,
           displayWorkAreaDip,
-          windowBoundsDip
+          windowBoundsDip: windowBoundsDip ?? { x: 0, y: 0, width: 0, height: 0 }
         },
         null
       );
@@ -846,6 +918,31 @@ function handleInit(command: { protocolVersion: number; appName: string; parentP
 
   log('Init successful', { appName: command.appName, parentPid: command.parentPid });
   sendEvent({ type: 'InitAck', ok: true }, requestId);
+
+  // Proactively push the initial window transform so AI_maid receives
+  // the current bounds right after init (mirrors TransformChanged format).
+  const initBounds = mainWindow?.getBounds();
+  let initDpiScale = 1;
+  if (initBounds) {
+    try {
+      initDpiScale = screen.getDisplayMatching(initBounds).scaleFactor || 1;
+    } catch (e) {
+      log('Failed to get dpiScale for init transform', { error: e });
+    }
+  }
+  sendEvent(
+    {
+      type: 'TransformChanged',
+      xDip: initBounds?.x ?? 0,
+      yDip: initBounds?.y ?? 0,
+      widthDip: initBounds?.width ?? 0,
+      heightDip: initBounds?.height ?? 0,
+      scale: 1,
+      dpiScale: initDpiScale,
+      reason: 'init'
+    },
+    null
+  );
 }
 
 function handleLoadModel(
@@ -864,17 +961,11 @@ function handleLoadModel(
     return;
   }
 
-  const hostBounds = mainWindow.getBounds();
-  const initialTransform = command.initialTransform ? {
-    ...command.initialTransform,
-    x: typeof command.initialTransform.x === 'number' ? command.initialTransform.x - hostBounds.x : undefined,
-    y: typeof command.initialTransform.y === 'number' ? command.initialTransform.y - hostBounds.y : undefined
-  } : undefined;
   const rendererCommand: LoadModelRendererCommand = {
     type: 'LoadModel',
     roleId: command.roleId,
     modelPath: command.modelPath,
-    initialTransform
+    initialTransform: command.initialTransform
   };
 
   if (isModelLoading) {
@@ -897,6 +988,16 @@ function startModelLoad(
   isModelLoading = true;
   pendingLoadModelRequestId = requestId;
   pendingLoadModelPath = rendererCommand.modelPath;
+
+  if (rendererCommand.initialTransform && typeof rendererCommand.initialTransform.x === 'number' && typeof rendererCommand.initialTransform.y === 'number') {
+    const bounds = mainWindow!.getBounds();
+    mainWindow!.setBounds({
+      x: Math.round(rendererCommand.initialTransform.x),
+      y: Math.round(rendererCommand.initialTransform.y),
+      width: bounds.width,
+      height: bounds.height
+    }, false);
+  }
 
   if (!rendererReady) {
     log('Renderer not ready yet, caching LoadModel', { modelPath: rendererCommand.modelPath, requestId });
@@ -967,11 +1068,18 @@ function handleSetTransform(command: { x: number; y: number; scale: number }, re
     return;
   }
 
-  const hostBounds = mainWindow.getBounds();
+  // Set window position (keep current size; renderer will resize via petResizeToFit)
+  const bounds = mainWindow.getBounds();
+  mainWindow.setBounds({
+    x: Math.round(command.x),
+    y: Math.round(command.y),
+    width: bounds.width,
+    height: bounds.height
+  }, false);
+
+  // Forward scale to renderer; renderer will emit TransformChanged after applying
   const rendererCommand: RendererCommand = {
     type: 'SetTransform',
-    x: command.x - hostBounds.x,
-    y: command.y - hostBounds.y,
     scale: command.scale
   };
   sendCommandToRenderer(rendererCommand);

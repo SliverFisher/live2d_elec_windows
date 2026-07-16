@@ -443,13 +443,6 @@ export class BubbleManager {
   onResize(): void {
     this.relayoutIfVisible();
   }
-
-  containsClientPoint(clientX: number, clientY: number): boolean {
-    if (!this.bubbleEl || this.bubbleEl.classList.contains('is-hidden')) return false;
-    const rect = this.bubbleEl.getBoundingClientRect();
-    return clientX >= rect.left && clientX <= rect.right &&
-      clientY >= rect.top && clientY <= rect.bottom;
-  }
 }
 
 function clamp(value: number, min: number, max: number): number {

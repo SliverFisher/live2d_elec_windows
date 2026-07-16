@@ -3,7 +3,6 @@ import type { RendererCommand } from '../main/protocolTypes';
 import { Live2DPlayer } from './live2d/Live2DPlayer';
 import { playMotion, setExpression, applyActionTag, startSpeaking, startSpeakingWithAudio, stopSpeaking, loadActionTagMap } from './live2d/motionController';
 import { BubbleManager } from './live2d/BubbleManager';
-import { PetPanelController, type PetPanelBounds } from './live2d/PetPanelController';
 
 console.info('Renderer script starting');
 
@@ -31,15 +30,13 @@ window.addEventListener('unhandledrejection', (event) => {
 });
 
 const canvasElement = document.querySelector<HTMLCanvasElement>('#live2d-canvas');
-const petPanelElement = document.querySelector<HTMLDivElement>('#petPanel');
 const statusElement = document.querySelector<HTMLDivElement>('#status');
 
-if (!canvasElement || !petPanelElement || !statusElement) {
+if (!canvasElement || !statusElement) {
   throw new Error('Renderer DOM is incomplete.');
 }
 
 const canvas = canvasElement;
-const petPanel = new PetPanelController(petPanelElement);
 const status = statusElement;
 
 let player: Live2DPlayer;
@@ -47,12 +44,11 @@ let bubbleManager: BubbleManager;
 const DRAG_START_DISTANCE = 6;
 let dragPointerId: number | null = null;
 let dragStartPoint: { clientX: number; clientY: number } | null = null;
-let dragStartBounds: PetPanelBounds | null = null;
 let dragStarted = false;
 let scaleReportTimer: number | null = null;
 let pendingDragFrameId: number | null = null;
-let pendingDragDelta = { x: 0, y: 0 };
 let ignoringTransparentInput = false;
+let isResizingWindow = false;
 let currentModelPath: string | null = null;
 
 try {
@@ -106,6 +102,16 @@ bubbleManager = new BubbleManager({
 // AI_madi mode: wait for LoadModel command.
 void initDevModel();
 
+window.addEventListener('resize', () => {
+  if (isResizingWindow) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    player.handleWindowResize();
+    bubbleManager.onResize();
+  });
+});
+
 window.addEventListener('blur', () => {
   endDrag();
   setTransparentInputIgnored(true);
@@ -137,7 +143,6 @@ canvas.addEventListener('pointerdown', (event) => {
   setTransparentInputIgnored(false);
   dragPointerId = event.pointerId;
   dragStartPoint = { clientX: event.clientX, clientY: event.clientY };
-  dragStartBounds = petPanel.bounds;
   dragStarted = false;
   canvas.setPointerCapture(event.pointerId);
 });
@@ -156,9 +161,10 @@ canvas.addEventListener('pointermove', (event) => {
 
     if (!dragStarted) {
       dragStarted = true;
+      void window.live2dRenderer.petDragStart();
     }
 
-    queuePetDragMove(dx, dy);
+    queuePetDragMove();
   }
 });
 
@@ -173,7 +179,10 @@ canvas.addEventListener('pointerup', (event) => {
   clearDragState();
 
   if (wasDragging) {
-    emitTransformChanged('dragEnd');
+    void window.live2dRenderer.petDragEnd().then(() => {
+      // Report final transform after drag ends
+      emitTransformChanged('dragEnd');
+    });
   } else if (wasInside) {
     emitPointerEvent(event, 'leftClick');
     void playMotion(player.currentModel, 'TapBody', 0).catch(() => undefined);
@@ -191,7 +200,9 @@ canvas.addEventListener('pointercancel', (event) => {
   clearDragState();
 
   if (wasDragging) {
-    emitTransformChanged('dragCancel');
+    void window.live2dRenderer.petDragEnd().then(() => {
+      emitTransformChanged('dragCancel');
+    });
   }
 });
 
@@ -204,7 +215,9 @@ canvas.addEventListener('lostpointercapture', (event) => {
   clearDragState();
 
   if (wasDragging) {
-    emitTransformChanged('dragCancel');
+    void window.live2dRenderer.petDragEnd().then(() => {
+      emitTransformChanged('dragCancel');
+    });
   }
 });
 
@@ -214,18 +227,18 @@ canvas.addEventListener('dblclick', (event) => {
   }
 
   player.setUserScale(1);
-  resizePetPanelToModel();
-  emitTransformChanged('dblclickReset');
+  const fitted = player.getFittedWindowSize();
+  isResizingWindow = true;
+  void window.live2dRenderer.petResizeToFit(fitted.width, fitted.height).finally(() => {
+    setTimeout(() => { isResizingWindow = false; }, 100);
+    emitTransformChanged('dblclickReset');
+  });
 });
 
 canvas.addEventListener('pointerleave', () => {
   if (dragPointerId === null) {
     setTransparentInputIgnored(true);
   }
-});
-
-window.addEventListener('mousemove', (event) => {
-  updateTransparentInput(event.clientX, event.clientY);
 });
 
 canvas.addEventListener('wheel', (event) => {
@@ -240,7 +253,11 @@ canvas.addEventListener('wheel', (event) => {
   const nextScale = player.currentScale * zoomFactor;
   const finalScale = player.setUserScale(nextScale);
 
-  resizePetPanelToModel();
+  const fitted = player.getFittedWindowSize();
+  isResizingWindow = true;
+  void window.live2dRenderer.petResizeToFit(fitted.width, fitted.height).finally(() => {
+    setTimeout(() => { isResizingWindow = false; }, 100);
+  });
 
   // Throttle scale change reporting
   if (scaleReportTimer !== null) {
@@ -292,11 +309,10 @@ async function handleCommand(command: RendererCommand): Promise<void> {
           player.setUserScale(command.initialTransform.scale);
         }
 
-        resizePetPanelToModel();
-        if (typeof command.initialTransform?.x === 'number' &&
-            typeof command.initialTransform?.y === 'number') {
-          petPanel.setPosition(command.initialTransform.x, command.initialTransform.y);
-        }
+        const fitted = player.getFittedWindowSize();
+        isResizingWindow = true;
+        await window.live2dRenderer.petResizeToFit(fitted.width, fitted.height);
+        setTimeout(() => { isResizingWindow = false; }, 100);
 
         // After resize-to-fit, emit a TransformChanged so AI_maid captures the
         // final window bounds (width/height come from main's getBounds).
@@ -311,10 +327,13 @@ async function handleCommand(command: RendererCommand): Promise<void> {
         break;
       }
       case 'SetTransform': {
-        player.setUserScale(command.scale);
-        resizePetPanelToModel();
-        petPanel.setPosition(command.x, command.y);
+        const scale = player.setUserScale(command.scale);
+        const fitted = player.getFittedWindowSize();
+        isResizingWindow = true;
+        await window.live2dRenderer.petResizeToFit(fitted.width, fitted.height);
+        setTimeout(() => { isResizingWindow = false; }, 100);
         emitTransformChanged('setTransform');
+        void scale;
         break;
       }
       case 'PlayMotion':
@@ -376,33 +395,13 @@ async function handleCommand(command: RendererCommand): Promise<void> {
           partsCount: includeParts ? geometry.parts.length : 0
         });
 
-        const offset = petPanel.bounds;
-        const shiftPoint = (point: { x: number; y: number }) => ({
-          x: point.x + offset.x,
-          y: point.y + offset.y
-        });
-        const shiftBounds = (bounds: { x: number; y: number; width: number; height: number }) => ({
-          ...bounds,
-          x: bounds.x + offset.x,
-          y: bounds.y + offset.y
-        });
         await window.live2dRenderer.emitEvent({
           type: 'ModelGeometryResult',
           ok: true,
           roleId: command.roleId,
-          modelBounds: shiftBounds(geometry.modelBounds),
-          anchors: includeAnchors ? {
-            modelCenter: shiftPoint(geometry.anchors.modelCenter),
-            headTop: shiftPoint(geometry.anchors.headTop),
-            faceCenter: shiftPoint(geometry.anchors.faceCenter),
-            bodyCenter: shiftPoint(geometry.anchors.bodyCenter),
-            feetCenter: shiftPoint(geometry.anchors.feetCenter)
-          } : undefined,
-          parts: includeParts ? geometry.parts.map((part) => ({
-            ...part,
-            bounds: shiftBounds(part.bounds),
-            anchor: shiftPoint(part.anchor)
-          })) : undefined,
+          modelBounds: geometry.modelBounds,
+          anchors: includeAnchors ? geometry.anchors : undefined,
+          parts: includeParts ? geometry.parts : undefined,
           scale: geometry.scale
         });
         break;
@@ -464,9 +463,8 @@ async function handleCommand(command: RendererCommand): Promise<void> {
 // ============================================================
 
 function emitPointerEvent(event: PointerEvent, kind: string): void {
-  const point = player.clientToPixiPoint(event.clientX, event.clientY);
-  const normalizedX = canvas.clientWidth > 0 ? point.x / canvas.clientWidth : 0;
-  const normalizedY = canvas.clientHeight > 0 ? point.y / canvas.clientHeight : 0;
+  const normalizedX = window.innerWidth > 0 ? event.clientX / window.innerWidth : 0;
+  const normalizedY = window.innerHeight > 0 ? event.clientY / window.innerHeight : 0;
   const hitAreas = player.hitTest(event.clientX, event.clientY);
   const hitAreaName = hitAreas.length > 0 ? hitAreas[0] : undefined;
   const bodyPart = resolveBodyPart(hitAreaName, normalizedY);
@@ -523,13 +521,8 @@ function resolveBodyPart(
 }
 
 function emitTransformChanged(reason: string): void {
-  const bounds = petPanel.bounds;
   void window.live2dRenderer.emitEvent({
     type: 'TransformChanged',
-    x: bounds.x,
-    y: bounds.y,
-    width: bounds.width,
-    height: bounds.height,
     scale: player.currentScale,
     reason
   });
@@ -547,7 +540,7 @@ function updateTransparentInput(clientX: number, clientY: number): void {
     return;
   }
 
-  const hit = player.containsPoint(clientX, clientY) || bubbleManager.containsClientPoint(clientX, clientY);
+  const hit = player.containsPoint(clientX, clientY);
   setTransparentInputIgnored(!hit);
 }
 
@@ -560,19 +553,15 @@ function setTransparentInputIgnored(ignore: boolean): void {
   void window.live2dRenderer.setIgnoreMouseEvents(ignore, ignore ? { forward: true } : undefined);
 }
 
-function queuePetDragMove(dx: number, dy: number): void {
-  pendingDragDelta = { x: dx, y: dy };
+function queuePetDragMove(): void {
   if (pendingDragFrameId !== null) {
     return;
   }
 
   pendingDragFrameId = window.requestAnimationFrame(() => {
     pendingDragFrameId = null;
-    if (dragStarted && dragPointerId !== null && dragStartBounds) {
-      petPanel.setPosition(
-        dragStartBounds.x + pendingDragDelta.x,
-        dragStartBounds.y + pendingDragDelta.y
-      );
+    if (dragStarted && dragPointerId !== null) {
+      void window.live2dRenderer.petDragMove();
     }
   });
 }
@@ -588,8 +577,6 @@ function clearDragState(): void {
 
   dragPointerId = null;
   dragStartPoint = null;
-  dragStartBounds = null;
-  pendingDragDelta = { x: 0, y: 0 };
   dragStarted = false;
 
   if (pendingDragFrameId !== null) {
@@ -602,15 +589,10 @@ function endDrag(): void {
   const wasDragging = dragStarted;
   clearDragState();
   if (wasDragging) {
-    emitTransformChanged('blur');
+    void window.live2dRenderer.petDragEnd().then(() => {
+      emitTransformChanged('blur');
+    });
   }
-}
-
-function resizePetPanelToModel(): void {
-  const fitted = player.getFittedWindowSize();
-  petPanel.resizeAroundCenter(fitted.width, fitted.height);
-  player.resizeViewport(fitted.width, fitted.height);
-  window.requestAnimationFrame(() => bubbleManager.onResize());
 }
 
 function setStatus(message: string): void {
@@ -650,7 +632,10 @@ async function initDevModel(): Promise<void> {
     console.info('[DEV] Loading model from:', modelUrl);
     await withTimeout(player.loadModel(modelUrl, cubismCoreUrl), 20000, 'Timed out while loading Live2D model.');
     setStatus('');
-    resizePetPanelToModel();
+    const fitted = player.getFittedWindowSize();
+    isResizingWindow = true;
+    await window.live2dRenderer.petResizeToFit(fitted.width, fitted.height);
+    setTimeout(() => { isResizingWindow = false; }, 100);
     setTransparentInputIgnored(true);
     console.info('[DEV] Model loaded successfully');
   } catch (error) {
