@@ -103,11 +103,8 @@ if (!checkCrashRateLimit()) {
 // Record this attempt. Cleared on successful init (app.whenReady success).
 recordStartupAttempt();
 
-// 当前 Windows 显卡/驱动组合在透明 Electron 窗口启用硬件合成时会停在
-// app.whenReady() 之前，因此保留已验证的 SwiftShader 启动链路。超大窗口尺寸
-// 由 .NET wrapper 在 HWND 创建后按 WPF 的物理虚拟桌面矩形同步。
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-gpu-sandbox');
+// Live2D 依赖持续 WebGL 渲染。不要禁用 GPU，否则 Chromium 会回退到
+// SwiftShader，在 CPU 上软件光栅化模型和透明画布。
 
 // AI_maid 的全屏 WPF 窗口使用系统 DPI 下的统一虚拟桌面坐标。Chromium 默认
 // 按每块显示器分别虚拟化 DIP，混合缩放时两套坐标无法直接相加。启动前固定为
@@ -281,7 +278,7 @@ app.whenReady().then(() => {
     // Log GPU status for diagnostics
     log('GPU status', {
       gpuFeatureStatus: app.getGPUFeatureStatus(),
-      hardwareAccelerationDisabled: true
+      hardwareAccelerationDisabled: !app.isHardwareAccelerationEnabled()
     });
 
     log('Env check', {

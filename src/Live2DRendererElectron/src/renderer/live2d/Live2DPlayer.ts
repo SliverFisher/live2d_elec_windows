@@ -30,6 +30,7 @@ const MODEL_HIT_PADDING = 4;
 const HIT_ALPHA_THRESHOLD = 12;
 const INITIAL_WINDOW_PADDING = 24;
 const BUBBLE_RESERVE_TOP = 200;       // 窗口顶部为气泡预留的额外高度
+const LIVE2D_RENDER_FPS = 30;
 
 export class Live2DPlayer {
   private app: Application;
@@ -428,6 +429,9 @@ export class Live2DPlayer {
       return;
     }
 
+    // Cubism 模型更新和 Pixi 提交共用同一个节拍，避免两套 ticker 各自以
+    // 显示器刷新率持续运行。30fps 与 Cubism 常用动作素材的时间基准一致。
+    Ticker.shared.maxFPS = LIVE2D_RENDER_FPS;
     Live2DModel!.registerTicker(Ticker);
 
     this.app = new Application({
@@ -435,7 +439,8 @@ export class Live2DPlayer {
       backgroundAlpha: 0,
       autoDensity: true,
       resolution: window.devicePixelRatio || 1,
-      preserveDrawingBuffer: true
+      preserveDrawingBuffer: true,
+      sharedTicker: true
     });
 
     this.canvasWidth = this.canvas.clientWidth || 720;
