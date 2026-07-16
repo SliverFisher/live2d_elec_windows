@@ -103,6 +103,13 @@ if (!checkCrashRateLimit()) {
 // Record this attempt. Cleared on successful init (app.whenReady success).
 recordStartupAttempt();
 
+// Windows 透明、无边框且跨虚拟桌面的 BrowserWindow 在部分显卡驱动上会在
+// Chromium GPU 初始化阶段直接退出，甚至来不及创建应用日志。Live2D 的 Pixi
+// WebGL 渲染仍由 Chromium 的 SwiftShader 路径完成；PetPanel 的拖动/缩放优化
+// 不依赖原生窗口合成，因此保留兼容开关。
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-sandbox');
+
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'live2d-file',
@@ -264,7 +271,7 @@ app.whenReady().then(() => {
     // Log GPU status for diagnostics
     log('GPU status', {
       gpuFeatureStatus: app.getGPUFeatureStatus(),
-      hardwareAccelerationDisabled: false
+      hardwareAccelerationDisabled: true
     });
 
     log('Env check', {
