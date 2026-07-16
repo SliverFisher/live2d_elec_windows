@@ -103,12 +103,22 @@ if (!checkCrashRateLimit()) {
 // Record this attempt. Cleared on successful init (app.whenReady success).
 recordStartupAttempt();
 
-// Windows 透明、无边框且跨虚拟桌面的 BrowserWindow 在部分显卡驱动上会在
-// Chromium GPU 初始化阶段直接退出，甚至来不及创建应用日志。Live2D 的 Pixi
-// WebGL 渲染仍由 Chromium 的 SwiftShader 路径完成；PetPanel 的拖动/缩放优化
-// 不依赖原生窗口合成，因此保留兼容开关。
+// 当前 Windows 显卡/驱动组合在透明 Electron 窗口启用硬件合成时会停在
+// app.whenReady() 之前，因此保留已验证的 SwiftShader 启动链路。超大窗口尺寸
+// 由 .NET wrapper 在 HWND 创建后按 WPF 的物理虚拟桌面矩形同步。
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-gpu-sandbox');
+
+// AI_maid 的全屏 WPF 窗口使用系统 DPI 下的统一虚拟桌面坐标。Chromium 默认
+// 按每块显示器分别虚拟化 DIP，混合缩放时两套坐标无法直接相加。启动前固定为
+// WPF 传入的系统缩放率，使 BrowserWindow bounds 与跨进程 Transform 坐标一致。
+const commandLineStartupArgs = parseStartupArgs(process.argv);
+if (commandLineStartupArgs.systemDpiScale) {
+  app.commandLine.appendSwitch(
+    'force-device-scale-factor',
+    commandLineStartupArgs.systemDpiScale.toString()
+  );
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -234,7 +244,7 @@ let isQuitting = false;
 
 app.whenReady().then(() => {
   try {
-    startupArgs = parseStartupArgs(process.argv);
+    startupArgs = commandLineStartupArgs;
 
     // Configure log directory if provided (must happen before first log)
     if (startupArgs.logDir) {

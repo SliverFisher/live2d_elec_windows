@@ -38,12 +38,45 @@ let loadModelTimeoutTimer: NodeJS.Timeout | null = null;
 const LOAD_MODEL_TIMEOUT_MS = 10000;
 let lastPetPanelBounds = { x: 0, y: 0, width: 720, height: 900 };
 
+function getWindowBoundsDiagnostic(window: BrowserWindow): object {
+  const bounds = window.getBounds();
+  const display = screen.getDisplayMatching(bounds);
+  return {
+    bounds,
+    contentBounds: window.getContentBounds(),
+    normalBounds: window.getNormalBounds(),
+    minimumSize: window.getMinimumSize(),
+    maximumSize: window.getMaximumSize(),
+    maximized: window.isMaximized(),
+    fullScreen: window.isFullScreen(),
+    display: {
+      id: display.id,
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor,
+      rotation: display.rotation
+    }
+  };
+}
+
+function getHostScreenOrigin(): { x: number; y: number } {
+  const startupBounds = parseStartupArgs().virtualScreenBounds;
+  if (startupBounds) {
+    return { x: startupBounds.x, y: startupBounds.y };
+  }
+  const bounds = mainWindow?.getBounds();
+  return { x: bounds?.x ?? 0, y: bounds?.y ?? 0 };
+}
+
 // Renderer crash auto-recovery — reload up to N times before giving up.
 // A successful reload resets the counter (tracked via did-finish-load).
 const MAX_RENDER_CRASH_RECOVERIES = 3;
 let renderCrashRecoveryAttempts = 0;
 
 function getVirtualDesktopBounds(): { x: number; y: number; width: number; height: number } {
+  // Chromium 在当前 Windows 软件合成链路中直接构造超大透明窗口会卡在
+  // BrowserWindow 构造阶段。先用 Electron 可稳定创建的显示器联合范围建立
+  // 隐藏窗口，随后由 .NET wrapper 在创建完成后把原生 HWND 扩到 WPF 的
+  // 完整物理虚拟桌面矩形。
   const displays = screen.getAllDisplays();
   const left = Math.min(...displays.map((display) => display.bounds.x));
   const top = Math.min(...displays.map((display) => display.bounds.y));
@@ -54,6 +87,20 @@ function getVirtualDesktopBounds(): { x: number; y: number; width: number; heigh
 
 export function createRendererWindow(): BrowserWindow {
   const desktopBounds = getVirtualDesktopBounds();
+  const startupArgs = parseStartupArgs();
+  log('Display topology', {
+    boundsSource: 'electron-display-union-then-native-wpf-sync',
+    requestedVirtualScreenBounds: startupArgs.virtualScreenBounds,
+    systemDpiScale: startupArgs.systemDpiScale,
+    desktopBounds,
+    displays: screen.getAllDisplays().map((display) => ({
+      id: display.id,
+      bounds: display.bounds,
+      workArea: display.workArea,
+      scaleFactor: display.scaleFactor,
+      rotation: display.rotation
+    }))
+  });
   log('BrowserWindow create start', {
     transparent: true,
     frame: false,
@@ -67,7 +114,10 @@ export function createRendererWindow(): BrowserWindow {
     frame: false,
     transparent: true,
     alwaysOnTop: true,
-    resizable: false,
+    // 必须保持可调整尺寸：Windows/Electron 会把 non-resizable 的超大透明
+    // BrowserWindow 夹回单个显示器范围，导致跨屏角色在宿主边界硬裁切。
+    // 窗口无边框且边缘位于虚拟桌面外沿，用户不会获得普通窗口缩放交互。
+    resizable: true,
     skipTaskbar: true,
     backgroundColor: '#00000000',
     show: false,
@@ -79,14 +129,25 @@ export function createRendererWindow(): BrowserWindow {
     }
   });
 
-  mainWindow.setResizable(false);
   mainWindow.setAlwaysOnTop(true, 'screen-saver');
   mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  // Transparent frameless windows can retain a maximum-size constraint derived
+  // from the monitor used during construction. The native full-virtual-desktop
+  // SetWindowPos would then be synchronously clamped back to that first size.
+  // Open the constraint to the requested virtual desktop (plus rounding room)
+  // before the wrapper synchronizes the HWND in physical pixels.
+  const requestedBounds = startupArgs.virtualScreenBounds;
+  const maximumWidth = Math.ceil(Math.max(desktopBounds.width, requestedBounds?.width ?? 0)) + 4;
+  const maximumHeight = Math.ceil(Math.max(desktopBounds.height, requestedBounds?.height ?? 0)) + 4;
+  mainWindow.setMaximumSize(maximumWidth, maximumHeight);
+  log('BrowserWindow maximum size opened for native synchronization', {
+    maximumSize: mainWindow.getMaximumSize()
+  });
 
   log('BrowserWindow created', {
     id: mainWindow.id,
     visible: mainWindow.isVisible(),
-    bounds: mainWindow.getBounds()
+    ...getWindowBoundsDiagnostic(mainWindow)
   });
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -112,6 +173,12 @@ export function createRendererWindow(): BrowserWindow {
   mainWindow.on('show', () => {
     log('BrowserWindow event: show', { id: mainWindow?.id });
   });
+
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      log('BrowserWindow bounds after native host synchronization', { bounds: mainWindow.getBounds() });
+    }
+  }, 1500);
 
   mainWindow.on('hide', () => {
     log('BrowserWindow event: hide', { id: mainWindow?.id });
@@ -397,10 +464,10 @@ function handleRendererEvent(event: RendererEvent): void {
       processQueuedLoadModel();
       break;
     case 'TransformChanged': {
-      const hostBounds = mainWindow?.getBounds();
+      const hostOrigin = getHostScreenOrigin();
       const bounds = {
-        x: (hostBounds?.x ?? 0) + event.x,
-        y: (hostBounds?.y ?? 0) + event.y,
+        x: hostOrigin.x + event.x,
+        y: hostOrigin.y + event.y,
         width: event.width,
         height: event.height
       };
@@ -506,9 +573,9 @@ function handleModelGeometryResult(
   const requestId = pendingQueryGeometryRequestId;
   pendingQueryGeometryRequestId = null;
 
-  const windowBounds = mainWindow?.getBounds();
-  const offsetX = windowBounds?.x ?? 0;
-  const offsetY = windowBounds?.y ?? 0;
+  const hostOrigin = getHostScreenOrigin();
+  const offsetX = hostOrigin.x;
+  const offsetY = hostOrigin.y;
 
   if (!event.ok) {
     log('ModelGeometryResult (failure)', {
@@ -864,11 +931,11 @@ function handleLoadModel(
     return;
   }
 
-  const hostBounds = mainWindow.getBounds();
+  const hostOrigin = getHostScreenOrigin();
   const initialTransform = command.initialTransform ? {
     ...command.initialTransform,
-    x: typeof command.initialTransform.x === 'number' ? command.initialTransform.x - hostBounds.x : undefined,
-    y: typeof command.initialTransform.y === 'number' ? command.initialTransform.y - hostBounds.y : undefined
+    x: typeof command.initialTransform.x === 'number' ? command.initialTransform.x - hostOrigin.x : undefined,
+    y: typeof command.initialTransform.y === 'number' ? command.initialTransform.y - hostOrigin.y : undefined
   } : undefined;
   const rendererCommand: LoadModelRendererCommand = {
     type: 'LoadModel',
@@ -967,11 +1034,11 @@ function handleSetTransform(command: { x: number; y: number; scale: number }, re
     return;
   }
 
-  const hostBounds = mainWindow.getBounds();
+  const hostOrigin = getHostScreenOrigin();
   const rendererCommand: RendererCommand = {
     type: 'SetTransform',
-    x: command.x - hostBounds.x,
-    y: command.y - hostBounds.y,
+    x: command.x - hostOrigin.x,
+    y: command.y - hostOrigin.y,
     scale: command.scale
   };
   sendCommandToRenderer(rendererCommand);
