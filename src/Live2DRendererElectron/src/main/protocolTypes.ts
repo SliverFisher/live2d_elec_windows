@@ -157,7 +157,7 @@ export type RendererCommand =
   | { type: 'SetActionTag'; actionTag: string; durationMs?: number }
   | { type: 'SpeakStart'; text?: string; audioPath?: string; estimatedDurationMs?: number }
   | { type: 'SpeakStop' }
-  | { type: 'SetTransform'; scale: number }
+  | { type: 'SetTransform'; x: number; y: number; scale: number }
   | {
       type: 'QueryModelGeometry';
       roleId?: string;
@@ -178,8 +178,8 @@ export type RendererCommand =
 
 /**
  * Event sent from renderer to main via IPC.
- * NOTE: TransformChanged here only carries scale + reason; the main process
- * fills in xDip/yDip/widthDip/heightDip from the window bounds before forwarding to AI_maid.
+ * NOTE: TransformChanged coordinates are local to the fixed virtual-desktop host;
+ * the main process converts them to screen DIP before forwarding to AI_maid.
  * RightClick here only carries screenXDip/screenYDip (in DIP); the main process fills in
  * screenXPx/screenYPx (via screen.dipToScreenPoint), display info (id, scaleFactor,
  * bounds, workArea), and windowBoundsDip before forwarding.
@@ -187,7 +187,15 @@ export type RendererCommand =
 export type RendererEvent =
   | { type: 'ModelLoaded'; modelPath: string; roleId?: string }
   | { type: 'ModelLoadFailed'; modelPath: string; message: string }
-  | { type: 'TransformChanged'; scale: number; reason: string }
+  | {
+      type: 'TransformChanged';
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      scale: number;
+      reason: string;
+    }
   | {
       type: 'PointerEvent';
       kind: string;

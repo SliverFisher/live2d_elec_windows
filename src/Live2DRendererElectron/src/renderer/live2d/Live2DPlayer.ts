@@ -158,8 +158,8 @@ export class Live2DPlayer {
 
   clientToPixiPoint(clientX: number, clientY: number): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
-    const screenWidth = this.canvasWidth || window.innerWidth || this.canvas.clientWidth;
-    const screenHeight = this.canvasHeight || window.innerHeight || this.canvas.clientHeight;
+    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
+    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
     return {
       x: (clientX - rect.left) * (screenWidth / rect.width),
       y: (clientY - rect.top) * (screenHeight / rect.height)
@@ -169,8 +169,8 @@ export class Live2DPlayer {
   getFittedWindowSize(): { width: number; height: number } {
     if (this.baseModelWidth <= 0 || this.baseModelHeight <= 0) {
       return {
-        width: window.innerWidth,
-        height: window.innerHeight
+        width: this.canvas.clientWidth || 720,
+        height: this.canvas.clientHeight || 900
       };
     }
     const scaledWidth = this.baseModelWidth * this.baseFitScale * this.userScale + INITIAL_WINDOW_PADDING * 2;
@@ -269,13 +269,13 @@ export class Live2DPlayer {
     return this.userScale;
   }
 
-  handleWindowResize(): void {
-    if (!this.model || !this.app.renderer) {
+  resizeViewport(width: number, height: number): void {
+    if (!this.pixiInitialized || !this.app.renderer) {
       return;
     }
 
-    const newWidth = window.innerWidth;
-    const newHeight = window.innerHeight;
+    const newWidth = Math.max(1, Math.round(width));
+    const newHeight = Math.max(1, Math.round(height));
 
     if (Math.abs(newWidth - this.canvasWidth) < 1 && Math.abs(newHeight - this.canvasHeight) < 1) {
       return;
@@ -284,7 +284,7 @@ export class Live2DPlayer {
     this.canvasWidth = newWidth;
     this.canvasHeight = newHeight;
     this.app.renderer.resize(newWidth, newHeight);
-    this.applyTransform('handleWindowResize');
+    this.applyTransform('resizeViewport');
   }
 
   containsPoint(clientX: number, clientY: number): boolean {
@@ -438,8 +438,8 @@ export class Live2DPlayer {
       preserveDrawingBuffer: true
     });
 
-    this.canvasWidth = window.innerWidth;
-    this.canvasHeight = window.innerHeight;
+    this.canvasWidth = this.canvas.clientWidth || 720;
+    this.canvasHeight = this.canvas.clientHeight || 900;
     this.app.renderer.resize(this.canvasWidth, this.canvasHeight);
 
     const gl = this.canvas.getContext('webgl') ?? this.canvas.getContext('webgl2');
@@ -450,9 +450,6 @@ export class Live2DPlayer {
     this.gl = gl;
     this.pixiInitialized = true;
 
-    window.addEventListener('resize', () => {
-      this.handleWindowResize();
-    });
   }
 
   private calcBaseFit(originalWidth: number, originalHeight: number): void {
@@ -460,8 +457,8 @@ export class Live2DPlayer {
       return;
     }
 
-    const screenWidth = this.canvasWidth || window.innerWidth;
-    const screenHeight = this.canvasHeight || window.innerHeight;
+    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
+    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
     if (screenWidth <= 0 || screenHeight <= 0) {
       return;
     }
@@ -498,8 +495,8 @@ export class Live2DPlayer {
       return;
     }
 
-    const screenWidth = this.canvasWidth || window.innerWidth;
-    const screenHeight = this.canvasHeight || window.innerHeight;
+    const screenWidth = this.canvasWidth || this.canvas.clientWidth;
+    const screenHeight = this.canvasHeight || this.canvas.clientHeight;
     if (screenWidth <= 0 || screenHeight <= 0) {
       return;
     }

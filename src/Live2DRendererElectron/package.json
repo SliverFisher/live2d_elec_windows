@@ -1,6 +1,6 @@
 {
   "name": "live2d-renderer-electron",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone Live2D renderer process for WPF host applications.",
   "main": "out/main/main.js",
   "author": "MaidAI",

@@ -103,17 +103,6 @@ if (!checkCrashRateLimit()) {
 // Record this attempt. Cleared on successful init (app.whenReady success).
 recordStartupAttempt();
 
-// ============================================================
-// Requirement 5: GPU crash mitigation (diagnostic)
-//
-// --disable-gpu + --disable-gpu-sandbox 禁用 GPU 硬件加速，
-// 用于验证进程风暴是否由 GPU 进程崩溃引起。
-// 如果加了这个标志后问题消失，说明是 GPU 进程 crash 导致。
-// 确认后可移除这两个 flag。
-// ============================================================
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-gpu-sandbox');
-
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'live2d-file',
@@ -275,9 +264,7 @@ app.whenReady().then(() => {
     // Log GPU status for diagnostics
     log('GPU status', {
       gpuFeatureStatus: app.getGPUFeatureStatus(),
-      hardwareAccelerationDisabled: !app.isPackaged
-        ? 'unknown (dev mode)'
-        : 'true (--disable-gpu flag set)'
+      hardwareAccelerationDisabled: false
     });
 
     log('Env check', {
