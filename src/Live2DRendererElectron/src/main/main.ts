@@ -106,17 +106,6 @@ recordStartupAttempt();
 // Live2D 依赖持续 WebGL 渲染。不要禁用 GPU，否则 Chromium 会回退到
 // SwiftShader，在 CPU 上软件光栅化模型和透明画布。
 
-// AI_maid 的全屏 WPF 窗口使用系统 DPI 下的统一虚拟桌面坐标。Chromium 默认
-// 按每块显示器分别虚拟化 DIP，混合缩放时两套坐标无法直接相加。启动前固定为
-// WPF 传入的系统缩放率，使 BrowserWindow bounds 与跨进程 Transform 坐标一致。
-const commandLineStartupArgs = parseStartupArgs(process.argv);
-if (commandLineStartupArgs.systemDpiScale) {
-  app.commandLine.appendSwitch(
-    'force-device-scale-factor',
-    commandLineStartupArgs.systemDpiScale.toString()
-  );
-}
-
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'live2d-file',
@@ -241,7 +230,7 @@ let isQuitting = false;
 
 app.whenReady().then(() => {
   try {
-    startupArgs = commandLineStartupArgs;
+    startupArgs = parseStartupArgs(process.argv);
 
     // Configure log directory if provided (must happen before first log)
     if (startupArgs.logDir) {

@@ -5,8 +5,6 @@ export type StartupArgs = {
   logDir: string | null;
   model: string | null;
   noDefaultModel: boolean;
-  virtualScreenBounds: { x: number; y: number; width: number; height: number } | null;
-  systemDpiScale: number | null;
 };
 
 /**
@@ -25,12 +23,8 @@ export function parseStartupArgs(argv: string[] = process.argv): StartupArgs {
     parentPid: null,
     logDir: null,
     model: null,
-    noDefaultModel: false,
-    virtualScreenBounds: null,
-    systemDpiScale: null
+    noDefaultModel: false
   };
-
-  const virtualScreen: Partial<{ x: number; y: number; width: number; height: number }> = {};
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -67,51 +61,7 @@ export function parseStartupArgs(argv: string[] = process.argv): StartupArgs {
       case '--no-default-model':
         args.noDefaultModel = true;
         break;
-      case '--virtual-screen-left':
-        if (next && !next.startsWith('--')) {
-          virtualScreen.x = Number(next);
-          i++;
-        }
-        break;
-      case '--virtual-screen-top':
-        if (next && !next.startsWith('--')) {
-          virtualScreen.y = Number(next);
-          i++;
-        }
-        break;
-      case '--virtual-screen-width':
-        if (next && !next.startsWith('--')) {
-          virtualScreen.width = Number(next);
-          i++;
-        }
-        break;
-      case '--virtual-screen-height':
-        if (next && !next.startsWith('--')) {
-          virtualScreen.height = Number(next);
-          i++;
-        }
-        break;
-      case '--system-dpi-scale':
-        if (next && !next.startsWith('--')) {
-          const scale = Number(next);
-          if (Number.isFinite(scale) && scale > 0) {
-            args.systemDpiScale = scale;
-          }
-          i++;
-        }
-        break;
     }
-  }
-
-  if (
-    Number.isFinite(virtualScreen.x) &&
-    Number.isFinite(virtualScreen.y) &&
-    Number.isFinite(virtualScreen.width) &&
-    Number.isFinite(virtualScreen.height) &&
-    virtualScreen.width! > 0 &&
-    virtualScreen.height! > 0
-  ) {
-    args.virtualScreenBounds = virtualScreen as { x: number; y: number; width: number; height: number };
   }
 
   return args;
